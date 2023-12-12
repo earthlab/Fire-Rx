@@ -1,14 +1,23 @@
+import collections
 import getpass
 import os
 import re
+import shutil
 import sys
 import urllib
+from argparse import Namespace
 from http.cookiejar import CookieJar
 from multiprocessing import Pool
-from typing import Tuple, List
+from multiprocessing import set_start_method
+from typing import Tuple, List, Dict
 from datetime import datetime, timedelta
 import calendar
 import subprocess as sp
+from rasterio.merge import merge
+import rasterio as rio
+import h5py
+from apis.ecostress_conv.ECOSTRESS_swath2grid import main
+
 
 import bs4
 import certifi
@@ -25,6 +34,8 @@ class BaseAPI:
     Defines all the attributes and methods common to the child APIs.
     """
     PROJ_DIR = os.path.dirname(os.path.dirname(__file__))
+    _BASE_WUE_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO4WUE.001/'
+    _BASE_GEO_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO1BGEO.001/'
 
     def __init__(self, username: str = None, password: str = None, lazy: bool = False):
         """
@@ -85,7 +96,7 @@ class BaseAPI:
         if 'REQUESTS_CA_BUNDLE' not in os.environ or os.environ['REQUESTS_CA_BUNDLE'] != ssl_cert_path:
             os.environ['REQUESTS_CA_BUNDLE'] = ssl_cert_path
 
-    def _download(self, query: Tuple[str, str]) -> None:
+    def _download(self, query: Tuple[str, str], retry: int = 0) -> None:
         """
         Downloads data from the NASA earthdata servers. Authentication is established using the username and password
         found in the local ~/.netrc file.
@@ -117,6 +128,11 @@ class BaseAPI:
                 else:
                     break
 
+        if not self._verify_hdf_file(dest):
+            os.remove(dest)
+            if retry < 1:
+                self._download(query, retry=1)
+
     def download_time_series(self, queries: List[Tuple[str, str]], outdir: str):
         """
         Attempts to create download requests for each query, if that fails then makes each request in series.
@@ -128,25 +144,23 @@ class BaseAPI:
         # From earthlab firedpy package
         if len(queries) > 0:
             print("Retrieving data... skipping over any cached files")
-            try:
-                with Pool(int(self._core_count / 2)) as pool:
-                    for _ in tqdm(pool.imap_unordered(self._download, queries), total=len(queries)):
-                        pass
 
-            except Exception as pe:
-                try:
-                    _ = [self._download(q) for q in tqdm(queries, position=0, file=sys.stdout)]
-                except Exception as e:
-                    template = "Download failed: error type {0}:\n{1!r}"
-                    message = template.format(type(e).__name__, e.args)
-                    print(message)
+            with Pool(int(self._core_count / 2)) as pool:
+                for _ in tqdm(pool.imap_unordered(self._download, queries), total=len(queries)):
+                    pass
 
         print(f'Wrote {len(queries)} files to {outdir}')
 
+    @staticmethod
+    def _verify_hdf_file(file_path: str) -> bool:
+        try:
+            h5py.File(file_path)
+            return True
+        except OSError:
+            return False
+
 
 class L4WUE(BaseAPI):
-    _BASE_WUE_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO4WUE.001/'
-    _BASE_GEO_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO1BGEO.001/'
 
     def __init__(self, username: str = None, password: str = None, lazy: bool = False):
         super().__init__(username=username, password=password, lazy=lazy)
@@ -160,8 +174,14 @@ class L4WUE(BaseAPI):
         _, num_days = calendar.monthrange(year, month)
         return num_days
 
-    def download_time_series(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
-                             out_dir: str) -> None:
+    @staticmethod
+    def _generate_file_key(file_group_dict: Dict[str, str]) -> tuple:
+        return (file_group_dict['orbit'], file_group_dict['scene_id'], file_group_dict['year'],
+                file_group_dict['month'], file_group_dict['day'], file_group_dict['hour'], file_group_dict['minute'],
+                file_group_dict['second'])
+
+    def gather_file_links(self, year: int, month_start: int, month_end: int, hour_start: int,
+                          hour_end: int) -> List[Tuple[str, str]]:
         start_date = datetime(year, month_start, 1)
         end_date = datetime(year, month_end, self._get_last_day_of_month(year, month_end))
 
@@ -171,21 +191,39 @@ class L4WUE(BaseAPI):
             start_date += timedelta(days=1)
 
         urls = []
+        geo_lookup = collections.defaultdict(list)
         for day_url in day_urls:
-            print(day_url)
             day_files = self.retrieve_links(day_url)
-            print(day_files)
             for day_file in day_files:
                 match = re.match(self._wue_file_re, day_file)
                 if match:
-                    print(day_file)
                     groups = match.groupdict()
-                    if hour_start <= int(groups['hour']) <= hour_end:
-                        urls.append(urllib.parse.urljoin(day_url, day_file))
-                        urls.append(urllib.parse.urljoin(day_url.replace(self._BASE_WUE_URL, self._BASE_GEO_URL),
-                                                         day_file.replace('L4_WUE', 'L1B_GEO')))
+                    if hour_start <= int(groups['hour']) < hour_end:
+                        url = urllib.parse.urljoin(day_url, day_file)
+                        geo_lookup[os.path.basename(day_url[:-1])].append(url)
+                        urls.append(url)
 
-        super().download_time_series([(url, os.path.join(out_dir, os.path.basename(url))) for url in urls], out_dir)
+        # Now find the GEO urls. The versions are not always the same (this doesn't matter for the swath2grid function)
+        # so you cannot infer the GEO url from the WUE url. What should match is the orbit, scene_id, and date.
+        paired_urls = []
+        for date, wue_file_links in geo_lookup.items():
+            date_url = urllib.parse.urljoin(self._BASE_GEO_URL, date)
+            geo_links = self.retrieve_links(date_url)
+            geo_file_dict = {}
+            for geo_link in geo_links:
+                match = re.match(self._bgeo_file_re, geo_link)
+                if match:
+                    geo_file_group_dict = match.groupdict()
+                    key = self._generate_file_key(geo_file_group_dict)
+                    geo_file_dict[key] = urllib.parse.urljoin(date_url + '/', geo_link)
+
+            for wue_file_link in wue_file_links:
+                group_dict = re.match(self._wue_file_re, os.path.basename(wue_file_link)).groupdict()
+                key = self._generate_file_key(group_dict)
+                if key in geo_file_dict:
+                    paired_urls.append((wue_file_link, geo_file_dict[key]))
+
+        return paired_urls
 
     @staticmethod
     def _create_composite(in_dir: str, out_file: str):
@@ -197,30 +235,82 @@ class L4WUE(BaseAPI):
 
         # Read the data from each image and store it in a list
         image_data = []
+        x_size = None
+        y_size = None
+        # min_lat, max_lat, max_lon, min_lon = None, None, None, None
         for image in image_list:
-            dataset = gdal.Open(image)
-            image_data.append(dataset.ReadAsArray())
+            raster = rio.open(image)
+            image_data.append(raster)
+            # dataset = gdal.Open(image)
+            # gt = dataset.GetGeoTransform()
+            # # min_lat = gt[0] if min_lat is None or min_lat > gt[0] else min_lat
+            # # min_lon = gt[3] if min_lon is None or min_lon > gt[3] else min_lon
+            # # max_lat = gt[0] if max_lat is None or max_lat < gt[0] else max_lat
+            # # max_lon = gt[3] if max_lon is None or max_lon < gt[3] else max_lon
+            # x_size = dataset.RasterXSize if x_size is None else x_size
+            # y_size = dataset.RasterYSize if y_size is None else y_size
+            # image_data.append(dataset.ReadAsArray())
+        # print(min_lat, max_lat, max_lon, min_lon)
+        # median_image = np.median(image_data, axis=0)
 
-        # Compute the median composite image using numpy
-        median_image = np.median(image_data, axis=0)
+        mosaic, output = merge(image_data, method='max')
 
-        # Write the median composite image to a new geotif file
-        driver = gdal.GetDriverByName('GTiff')
-        output_dataset = driver.Create(out_file, dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Float32)
-        output_dataset.SetGeoTransform(dataset.GetGeoTransform())
-        output_dataset.SetProjection(dataset.GetProjection())
-        output_dataset.GetRasterBand(1).WriteArray(median_image)
-        output_dataset.FlushCache()
+        output_meta = raster.meta.copy()
+        output_meta.update(
+            {"driver": "GTiff",
+             "height": mosaic.shape[1],
+             "width": mosaic.shape[2],
+             "transform": output,
+             }
+        )
+
+        with rio.open(out_file, 'w', **output_meta) as m:
+            m.write(mosaic)
+
+        # # Write the median composite image to a new geotif file
+        # driver = gdal.GetDriverByName('GTiff')
+        # output_dataset = driver.Create(out_file, dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Float32)
+        # output_dataset.SetGeoTransform(dataset.GetGeoTransform())
+        # output_dataset.SetProjection(dataset.GetProjection())
+        # output_dataset.GetRasterBand(1).WriteArray(median_image)
+        # output_dataset.FlushCache()
 
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
-                           out_dir: str, out_file: str):
+                           out_file: str, batch_size: int = 50):
+        set_start_method('fork')
+        out_dir = os.path.join(self.PROJ_DIR, 'apis', f'{year}_{month_start}_{month_end}')
+        os.makedirs(out_dir, exist_ok=True)
 
         # Download the files if they don't exist
-        self.download_time_series(year, month_start, month_end, hour_start, hour_end, out_dir)
+        urls = self.gather_file_links(year, month_start, month_end, hour_start, hour_end)
 
-        # Convert them into TIFs
-        sp.call([sys.executable, os.path.join(self.PROJ_DIR, 'apis', 'ecostress_conv', 'ECOSTRESS_swath2grid.py'),
-                 '--proj', 'GEO', '--dir', out_dir])
+        # The geo files are large enough that it makes sense to delete them periodically by processing the swaths in
+        # batches
+        url_batches = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
+        geo_tiff_dir = os.path.join(out_dir, 'geo_tiffs')
+        os.makedirs(geo_tiff_dir, exist_ok=True)
+        print(geo_tiff_dir)
+        for url_batch in url_batches:
+            batch_out_dir = os.path.join(out_dir, 'batch')
+            os.makedirs(batch_out_dir, exist_ok=True)
+            print(batch_out_dir)
+
+            # First download the WUE files
+            self.download_time_series([(url_pair[0], os.path.join(batch_out_dir, os.path.basename(url_pair[0]))) for
+                                       url_pair in url_batch], batch_out_dir)
+
+            # Next download the GEO files
+            self.download_time_series([(url_pair[1], os.path.join(batch_out_dir, os.path.basename(url_pair[1]))) for
+                                       url_pair in url_batch], batch_out_dir)
+
+            # Convert them into TIFs
+            # exit_code = sp.call(
+            #     [sys.executable, os.path.join(self.PROJ_DIR, 'apis', 'ecostress_conv', 'ECOSTRESS_swath2grid.py'),
+            #      '--proj', 'GEO', '--dir', batch_out_dir, '--out_dir', geo_tiff_dir,
+            #      # '--sds', 'Water Use Efficiency/WUEavg'
+            #      ])
+            main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
+            shutil.rmtree(batch_out_dir)
 
         # Create the mosaic
         self._create_composite(out_dir, out_file)
