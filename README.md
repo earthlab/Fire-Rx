@@ -2,6 +2,7 @@
 NASA Rx-Fire: Prescribed Fire to Support Ecosystem Services (22-SMDSS22-0104)
 
 ## GEDI aboveground biomass density data
+We used Global Ecosystem Dynamics Investigation (GEDI) footpint based aboveground biomass density data. Aboveground biomass density estimates have been derived applying plant functional specific model to GEDI based relative height emtics and the units of teh data are at  megagrams per hectare (Mg/ha). Please refer the full python notebook on how to get the footprint based biomass data within a user defined polygon. The GEDI biomass python code here was adapted from the notebook provided by (https://github.com/ornldaac/gedi_tutorials/blob/main/access_gedi_l4a_hyrax.ipynb).
 
 ## ECOSTRESS WUE and ESI data
 
