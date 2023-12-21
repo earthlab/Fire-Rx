@@ -163,12 +163,21 @@ class BaseAPI:
 
     def _parse_bbox_from_xml(self, xml_url: str) -> Polygon:
         # Send a GET request with HTTP Basic Authentication
-        response = requests.get(xml_url, auth=(self._username, self._password))
+        pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pm.add_password(None, "https://urs.earthdata.nasa.gov", self._username, self._password)
+        cookie_jar = CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPBasicAuthHandler(pm),
+            urllib.request.HTTPCookieProcessor(cookie_jar)
+        )
+        urllib.request.install_opener(opener)
+        myrequest = urllib.request.Request(xml_url)
+        response = urllib.request.urlopen(myrequest)
 
         # Check if the request was successful
-        if response.status_code == 200:
+        if response.status == 200:
             # Parse the XML content
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.read())
             bounding_rect = root.find('.//BoundingRectangle')
             west = float(bounding_rect.find('WestBoundingCoordinate').text)
             north = float(bounding_rect.find('NorthBoundingCoordinate').text)
