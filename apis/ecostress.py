@@ -17,7 +17,9 @@ from rasterio.merge import merge
 import rasterio as rio
 import h5py
 from apis.ecostress_conv.ECOSTRESS_swath2grid import main
-
+from glob import glob
+import xml.etree.ElementTree as ET
+import multiprocessing as mp
 
 import bs4
 import certifi
@@ -25,8 +27,8 @@ import requests
 import urllib3.util
 from osgeo import gdal
 import numpy as np
-import glob
 from tqdm import tqdm
+from shapely.geometry import Polygon
 
 
 class BaseAPI:
@@ -105,8 +107,8 @@ class BaseAPI:
         """
         link = query[0]
         dest = query[1]
-
         if os.path.exists(dest):
+            print(f'Skipping {dest}')
             return
 
         pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
@@ -159,6 +161,32 @@ class BaseAPI:
         except OSError:
             return False
 
+    def _parse_bbox_from_xml(self, xml_url: str) -> Polygon:
+        # Send a GET request with HTTP Basic Authentication
+        response = requests.get(xml_url, auth=(self._username, self._password))
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Parse the XML content
+            root = ET.fromstring(response.content)
+            bounding_rect = root.find('.//BoundingRectangle')
+            west = float(bounding_rect.find('WestBoundingCoordinate').text)
+            north = float(bounding_rect.find('NorthBoundingCoordinate').text)
+            east = float(bounding_rect.find('EastBoundingCoordinate').text)
+            south = float(bounding_rect.find('SouthBoundingCoordinate').text)
+
+            return Polygon([(west, north), (east, north), (east, south), (west, south)])
+
+        else:
+            print("Failed to retrieve XML: HTTP Status Code", response.status_code)
+
+    def _overlaps_bbox(self, target_bbox: List[int], xml_url: str):
+        # Now apply spatial filter by downloading the xml files and checking if they overlap the bounding box
+        min_lon, min_lat, max_lon, max_lat = target_bbox[0], target_bbox[1], target_bbox[2], target_bbox[3]
+        target_bbox = Polygon([(min_lon, max_lat), (max_lon, max_lat), (max_lon, min_lat), (min_lon, min_lat)])
+        file_bbox = self._parse_bbox_from_xml(xml_url)
+        return file_bbox.intersects(target_bbox)
+
 
 class L4WUE(BaseAPI):
 
@@ -180,8 +208,19 @@ class L4WUE(BaseAPI):
                 file_group_dict['month'], file_group_dict['day'], file_group_dict['hour'], file_group_dict['minute'],
                 file_group_dict['second'])
 
+    def _worker(self, args):
+        day_url, day_file, bbox, hour_start, hour_end = args
+        match = re.match(self._wue_file_re, day_file)
+        if match:
+            groups = match.groupdict()
+            if hour_start <= int(groups['hour']) < hour_end:
+                url = urllib.parse.urljoin(day_url, day_file)
+                if self._overlaps_bbox(bbox, url + '.xml'):
+                    return os.path.basename(day_url[:-1]), url
+        return None
+
     def gather_file_links(self, year: int, month_start: int, month_end: int, hour_start: int,
-                          hour_end: int) -> List[Tuple[str, str]]:
+                          hour_end: int, bbox: List[int]) -> List[Tuple[str, str]]:
         start_date = datetime(year, month_start, 1)
         end_date = datetime(year, month_end, self._get_last_day_of_month(year, month_end))
 
@@ -190,18 +229,38 @@ class L4WUE(BaseAPI):
             day_urls.append(urllib.parse.urljoin(self._BASE_WUE_URL, start_date.strftime('%Y.%m.%d') + '/'))
             start_date += timedelta(days=1)
 
-        urls = []
-        geo_lookup = collections.defaultdict(list)
+        # Prepare arguments for multiprocessing
+        args = []
         for day_url in day_urls:
             day_files = self.retrieve_links(day_url)
             for day_file in day_files:
-                match = re.match(self._wue_file_re, day_file)
-                if match:
-                    groups = match.groupdict()
-                    if hour_start <= int(groups['hour']) < hour_end:
-                        url = urllib.parse.urljoin(day_url, day_file)
-                        geo_lookup[os.path.basename(day_url[:-1])].append(url)
-                        urls.append(url)
+                args.append((day_url, day_file, bbox, hour_start, hour_end))
+
+        geo_lookup = collections.defaultdict(list)
+
+        with Pool(mp.cpu_count() - 1) as pool:
+            # Using tqdm to create a progress bar
+            for result in tqdm(pool.imap_unordered(self._worker, args), total=len(args),
+                               desc='Finding overlapping files'):
+                if result:
+                    day, url = result
+                    geo_lookup[day].append(url)
+
+        # urls = []
+        # geo_lookup = collections.defaultdict(list)
+        # for day_url in day_urls:
+        #     day_files = self.retrieve_links(day_url)
+        #     for day_file in day_files:
+        #         match = re.match(self._wue_file_re, day_file)
+        #         if match:
+        #             groups = match.groupdict()
+        #             if hour_start <= int(groups['hour']) < hour_end:
+        #                 url = urllib.parse.urljoin(day_url, day_file)
+        #                 if self._overlaps_bbox(bbox, url + '.xml'):
+        #                     geo_lookup[os.path.basename(day_url[:-1])].append(url)
+        #                     urls.append(url)
+        #                 else:
+        #                     print('Doesnt overlap')
 
         # Now find the GEO urls. The versions are not always the same (this doesn't matter for the swath2grid function)
         # so you cannot infer the GEO url from the WUE url. What should match is the orbit, scene_id, and date.
@@ -228,7 +287,7 @@ class L4WUE(BaseAPI):
     @staticmethod
     def _create_composite(in_dir: str, out_file: str):
         # Get a list of all the geotif images in the specified directory
-        image_list = glob.glob(os.path.join(in_dir, '*.tif'))
+        image_list = glob(os.path.join(in_dir, '*.tif'))
 
         if not image_list:
             raise FileNotFoundError(f'No tif files found in {in_dir}')
@@ -275,42 +334,57 @@ class L4WUE(BaseAPI):
         # output_dataset.GetRasterBand(1).WriteArray(median_image)
         # output_dataset.FlushCache()
 
+    @staticmethod
+    def _tif_file_exists(dest: str) -> bool:
+        return (os.path.exists(os.path.join(os.path.dirname(os.path.dirname(dest)), 'geo_tiffs',
+                                            os.path.basename(dest).strip('.h5') + '_WUEavg_GEO.tif')) or
+                glob(os.path.join(os.path.dirname(os.path.dirname(dest)), 'geo_tiffs',
+                                  os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
+                                  '*' + '_WUEavg_GEO.tif')))
+
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
-                           out_file: str, batch_size: int = 50):
+                           out_file: str, bbox: List[int], batch_size: int = 50):
         set_start_method('fork')
-        out_dir = os.path.join(self.PROJ_DIR, 'apis', f'{year}_{month_start}_{month_end}')
+
+        out_dir = os.path.join(self.PROJ_DIR, 'apis', f'{year}_{month_start}_{month_end}_{hour_start}_{hour_end}')
         os.makedirs(out_dir, exist_ok=True)
 
+        batch_out_dir = os.path.join(out_dir, 'batch')
+        os.makedirs(batch_out_dir, exist_ok=True)
+
+        geo_tiff_dir = os.path.join(out_dir, 'geo_tiffs')
+        os.makedirs(geo_tiff_dir, exist_ok=True)
+
         # Download the files if they don't exist
-        urls = self.gather_file_links(year, month_start, month_end, hour_start, hour_end)
+        urls = self.gather_file_links(year, month_start, month_end, hour_start, hour_end, bbox)
+
+        print(f'{len(urls)} URLs total')
 
         # The geo files are large enough that it makes sense to delete them periodically by processing the swaths in
         # batches
         url_batches = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
-        geo_tiff_dir = os.path.join(out_dir, 'geo_tiffs')
-        os.makedirs(geo_tiff_dir, exist_ok=True)
-        print(geo_tiff_dir)
+
         for url_batch in url_batches:
-            batch_out_dir = os.path.join(out_dir, 'batch')
             os.makedirs(batch_out_dir, exist_ok=True)
-            print(batch_out_dir)
 
-            # First download the WUE files
-            self.download_time_series([(url_pair[0], os.path.join(batch_out_dir, os.path.basename(url_pair[0]))) for
-                                       url_pair in url_batch], batch_out_dir)
+            wue_requests = [(url_pair[0], os.path.join(batch_out_dir, os.path.basename(url_pair[0]))) for
+                            url_pair in url_batch if
+                            not self._tif_file_exists(os.path.join(batch_out_dir, os.path.basename(url_pair[0])))]
 
-            # Next download the GEO files
-            self.download_time_series([(url_pair[1], os.path.join(batch_out_dir, os.path.basename(url_pair[1]))) for
-                                       url_pair in url_batch], batch_out_dir)
+            geo_requests = [(url_pair[1], os.path.join(batch_out_dir, os.path.basename(url_pair[1]))) for
+                            url_pair in url_batch if
+                            not self._tif_file_exists(os.path.join(batch_out_dir, os.path.basename(url_pair[1])))]
+
+            if wue_requests:
+                self.download_time_series(wue_requests, batch_out_dir)
+
+            if geo_requests:
+                self.download_time_series(geo_requests, batch_out_dir)
 
             # Convert them into TIFs
-            # exit_code = sp.call(
-            #     [sys.executable, os.path.join(self.PROJ_DIR, 'apis', 'ecostress_conv', 'ECOSTRESS_swath2grid.py'),
-            #      '--proj', 'GEO', '--dir', batch_out_dir, '--out_dir', geo_tiff_dir,
-            #      # '--sds', 'Water Use Efficiency/WUEavg'
-            #      ])
-            main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
-            shutil.rmtree(batch_out_dir)
+            if os.listdir(batch_out_dir):
+                main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
+                shutil.rmtree(batch_out_dir)
 
         # Create the mosaic
         self._create_composite(out_dir, out_file)

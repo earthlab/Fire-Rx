@@ -48,7 +48,6 @@ def main(args):
     else:
         inDir = args.dir
 
-    scriptDir = os.getcwd() + os.sep
     # Find input directory
     try:
         os.chdir(inDir)
