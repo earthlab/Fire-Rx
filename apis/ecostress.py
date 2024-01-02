@@ -23,7 +23,6 @@ import xml.etree.ElementTree as ET
 import multiprocessing as mp
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, and_, create_engine
-from database.tables import engine, File, Pixel
 
 import bs4
 import certifi
@@ -33,6 +32,33 @@ from osgeo import gdal
 import numpy as np
 from tqdm import tqdm
 from shapely.geometry import Polygon
+
+
+def process_file(file, max_lat, min_lon, res):
+    # Function to process a single file
+    medians = {}
+    g = gdal.Open(file)
+    a = g.ReadAsArray()
+    geo_transform = g.GetGeoTransform()
+
+    progress = tqdm(total=a.size, desc=os.path.basename(file))
+
+    for j, row in enumerate(a):
+        lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5])) / res))
+        for i in range(len(row)):
+            lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / res)
+            medians[(lat_index, lon_index)] = a[j, i]
+            progress.update(1)
+    return medians
+
+
+def combine_medians(results):
+    # Function to combine the results from all processes
+    combined_medians = collections.defaultdict(list)
+    for medians in results:
+        for key in tqdm(medians):
+            combined_medians[key].append(medians[key])
+    return combined_medians
 
 
 class BaseAPI:
@@ -340,65 +366,86 @@ class L4WUE(BaseAPI):
 
         return paired_urls
 
-    def _create_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
-                          bbox: List[int], out_file: str):
-        with Session(bind=engine) as session:
-            # First get all the files, filtering on the hour month and bounding box
-            min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
+    def _create_composite(self, in_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
+                          hour_end: int, bbox: List[int], out_file: str):
 
-            files = session.query(File).filter(
-                and_(
-                    extract('hour', File.timestamp) >= hour_start,
-                    extract('hour', File.timestamp) < hour_end
-                )
-            ).filter(
-                and_(
-                    extract('month', File.timestamp) >= month_start,
-                    extract('month', File.timestamp) <= month_end
-                )
-            ).filter(
-                extract('year', File.timestamp) == year
-            ).filter(
-                and_(
-                    File.min_lon < max_lon,
-                    File.max_lon > min_lon,
-                    File.min_lat < max_lat,
-                    File.max_lat > min_lat
-                )
-            ).all()
+        # First get all the files, filtering on the hour month and bounding box
+        min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-            # Create an empty array with 70m x 70m resolution
-            min_lon = min([f.min_lon for f in files])
-            max_lon = max([f.max_lon for f in files])
-            min_lat = min([f.min_lat for f in files])
-            max_lat = max([f.max_lat for f in files])
+        matching_geo_tiffs = {}
+        for geo_tiff in os.listdir(in_dir):
+            match = re.match(self._wue_tif_re, geo_tiff)
+            if match is not None:
+                group_dict = match.groupdict()
 
-            n_rows = math.ceil(max_lat - min_lat) / self._res
-            n_cols = math.ceil(max_lon - min_lon) / self._res
+                if (
+                        hour_start <= int(group_dict['hour']) < hour_end and
+                        month_start <= int(group_dict['month']) <= month_end and
+                        int(group_dict['year']) == year
+                ):
+                    file_path = os.path.join(in_dir, geo_tiff)
+                    g = gdal.Open(file_path)
+                    geo_transform = g.GetGeoTransform()
+                    y_dim, x_dim = g.ReadAsArray().shape
 
-            mosaic_array = np.full((n_rows, n_cols), np.nan)
+                    f_min_lon, f_min_lat, f_max_lon, f_max_lat = (geo_transform[0],
+                                                                  geo_transform[3] + (geo_transform[5] * y_dim),
+                                                                  geo_transform[0] + (geo_transform[1] * x_dim),
+                                                                  geo_transform[3])
 
-            for i, row in enumerate(mosaic_array):
-                row_min_lat = min_lat + (i * self._res)
-                row_max_lat = row_min_lat + self._res
-                for j, col in enumerate(row):
-                    col_min_lon = col_min_lon + (j * self._res)
-                    col_max_lon = col_min_lon + self._res
+                    if f_min_lon < max_lon and f_max_lon > min_lon and f_min_lat < max_lat and f_max_lat > min_lat:
+                        matching_geo_tiffs[file_path] = (f_min_lon, f_min_lat, f_max_lon, f_max_lat)
 
-                    pixels = session.query(Pixel).filter(
-                        and_(
-                            Pixel.latitude < row_max_lat,
-                            Pixel.latitude >= row_min_lat,
-                            Pixel.longitude < col_max_lon,
-                            Pixel.longitude >= col_min_lon
-                        )
-                    ).filter(
-                        Pixel.file.in_(files)
-                    ).all()
+        print(matching_geo_tiffs)
 
-                    mosaic_array[i, j] = np.nanmedian([p.value for p in pixels])
+        # Create an empty array with 70m x 70m resolution
+        min_lon = min([c[0] for c in matching_geo_tiffs.values()])
+        max_lon = max([c[2] for c in matching_geo_tiffs.values()])
+        min_lat = min([c[1] for c in matching_geo_tiffs.values()])
+        max_lat = max([c[3] for c in matching_geo_tiffs.values()])
 
-        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, self._res])
+        n_rows = int(math.ceil(max_lat - min_lat) / self._res)
+        n_cols = int(math.ceil(max_lon - min_lon) / self._res)
+
+        combined_medians = []
+        for file in matching_geo_tiffs:
+            combined_median = {}
+            print(file)
+            g = gdal.Open(file)
+            a = g.ReadAsArray()
+            geo_transform = g.GetGeoTransform()
+
+            progress = tqdm(total=a.size, desc=os.path.basename(file))
+
+            for j, row in enumerate(a):
+                lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5])) / self._res))
+                for i in range(len(row)):
+                    lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / self._res)
+                    combined_median[(lat_index, lon_index)] = a[j, i]
+                    progress.update(1)
+
+            combined_medians.append(combined_median)
+
+        # pool = mp.Pool(mp.cpu_count() - 1)
+        # combined_medians = pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
+        #                                                matching_geo_tiffs])
+        # pool.close()
+        # pool.join()
+
+        mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
+        progress = tqdm(total=mosaic_array.size, desc='Mosaicing')
+        for j in range(len(mosaic_array)):
+            for i in range(len(mosaic_array[j])):
+                median = []
+                for m in combined_medians:
+                    median.append(m.get((j, i), np.nan))
+                mosaic_array[(j, i)] = np.nanmedian(median)
+                progress.update(1)
+
+        del combined_medians
+
+        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, self._res],
+                                    g.GetProjection())
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
@@ -407,94 +454,6 @@ class L4WUE(BaseAPI):
                 glob(os.path.join(os.path.dirname(os.path.dirname(dest)), 'geo_tiffs',
                                   os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
                                   '*' + '_WUEavg_GEO.tif')))
-
-    # Prepare data for multiprocessing
-    @staticmethod
-    def _prepare_pixel_data(array, gt, file_id):
-        pixel_data = []
-        for i, row in enumerate(array):
-            mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
-            for j, col in enumerate(row):
-                pixel_info = {
-                    'value': array[i, j],
-                    'latitude': mid_lat,
-                    'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2),
-                    'file_id': file_id
-                }
-                pixel_data.append(pixel_info)
-        return pixel_data
-
-    @staticmethod
-    def _insert_pixels(pixel_data):
-        pixel_data, session, batch = pixel_data
-
-        try:
-            pixels = []
-            for data in tqdm(pixel_data, total=len(pixel_data), desc=f'Processing batch {batch}'):
-                new_pixel = Pixel(
-                    value=data['value'],
-                    latitude=data['latitude'],
-                    longitude=data['longitude'],
-                    _file_id=data['file_id']  # Assuming 'file' is referenced by 'file_id'
-                )
-                pixels.append(new_pixel)
-            session.bulk_save_objects(pixels)
-            session.commit()
-        except Exception as e:
-            print(f"Error: {e}")
-            session.rollback()
-        finally:
-            session.close()
-
-    def add_files_to_db(self, geo_tiff_dir):
-        with Session(bind=engine) as session:
-            for file in os.listdir(geo_tiff_dir):
-                match = re.match(self._wue_tif_re, file)
-                if match:
-                    params = match.groupdict()
-
-                    g = gdal.Open(os.path.join(geo_tiff_dir, file))
-                    gt = g.GetGeoTransform()
-                    array = g.ReadAsArray()
-
-                    existing_file = session.query(File).filter(File.name == file).first()
-                    if existing_file is not None:
-                        print('File already added')
-                        # TODO: May want to handle this differently in the future
-                        continue
-
-                    new_file = File(
-                        name=file,
-                        timestamp=datetime(year=int(params['year']), month=int(params['month']), day=int(params['day']),
-                                           hour=int(params['hour']), minute=int(params['minute']),
-                                           second=int(params['second'])),
-                        min_lon=gt[0],
-                        max_lon=gt[0] + (gt[1] * array.shape[0]),
-                        min_lat=gt[3],
-                        max_lat=gt[3] + (gt[5] * array.shape[1]),
-                        lon_res=gt[1],
-                        lat_res=gt[5]
-                    )
-
-                    session.add(new_file)
-                    session.flush()
-
-                    print('Adding new file')
-
-                    pixel_data = self._prepare_pixel_data(array, gt, new_file.id)
-                    chunk_size = len(pixel_data) // (mp.cpu_count() - 1)
-                    pixel_chunks = [pixel_data[i:i + chunk_size] for i in range(0, len(pixel_data), chunk_size)]
-                    print('sqlite:///' + os.path.join(self.PROJ_DIR, 'database', 'database.db'))
-                    for i, batch in enumerate(pixel_chunks):
-                        self._insert_pixels((batch, session, i))
-                    # with mp.Pool() as pool:
-                    #     list(tqdm(pool.imap(self._insert_pixels,
-                    #                         [(chunk, 'sqlite:///' + os.path.join(
-                    #                             self.PROJ_DIR, 'database', 'database.db'), i
-                    #                           ) for i, chunk in enumerate(pixel_chunks)]),
-                    #               total=len(pixel_chunks)))
-
-            session.commit()
 
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
                            out_file: str, bbox: List[int], batch_size: int = 50):
