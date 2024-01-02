@@ -32,7 +32,7 @@ from shapely.geometry import Polygon
 
 def process_file(file, max_lat, min_lon, res):
     # Function to process a single file
-    medians = {}
+    medians = collections.defaultdict(list)
     g = gdal.Open(file)
     a = g.ReadAsArray()
     geo_transform = g.GetGeoTransform()
@@ -43,7 +43,7 @@ def process_file(file, max_lat, min_lon, res):
         lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5])) / res))
         for i in range(len(row)):
             lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / res)
-            medians[(lat_index, lon_index)] = a[j, i]
+            medians[(lat_index, lon_index)].append(a[j, i])
             progress.update(1)
     return medians
 
@@ -403,9 +403,9 @@ class L4WUE(BaseAPI):
         n_rows = int(math.ceil(max_lat - min_lat) / self._res)
         n_cols = int(math.ceil(max_lon - min_lon) / self._res)
 
-        combined_medians = []
+        combined_medians = collections.defaultdict(list)
         for file in matching_geo_tiffs:
-            combined_median = {}
+
             print(file)
             g = gdal.Open(file)
             a = g.ReadAsArray()
@@ -414,17 +414,15 @@ class L4WUE(BaseAPI):
             progress = tqdm(total=a.size, desc=os.path.basename(file))
 
             for j, row in enumerate(a):
-                lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5])) / self._res))
+                lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5]))) / self._res)
                 for i in range(len(row)):
                     lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / self._res)
-                    combined_median[(lat_index, lon_index)] = a[j, i]
+                    combined_medians[(lat_index, lon_index)] = a[j, i]
                     progress.update(1)
 
-            combined_medians.append(combined_median)
-
         # pool = mp.Pool(mp.cpu_count() - 1)
-        # combined_medians = pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
-        #                                                matching_geo_tiffs])
+        # combined_medians = combine_medians(pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
+        #                                                matching_geo_tiffs]))
         # pool.close()
         # pool.join()
 
@@ -440,8 +438,8 @@ class L4WUE(BaseAPI):
 
         del combined_medians
 
-        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, self._res],
-                                    g.GetProjection())
+        self._numpy_array_to_raster(out_file, mosaic_array,
+                                    [min_lon, self._res, 0, max_lat, 0, -self._res], g.GetProjection())
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
