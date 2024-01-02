@@ -27,3 +27,4 @@ dependencies:
   - pyproj
   - pyresample
   - tqdm
+  - sqlalchemy

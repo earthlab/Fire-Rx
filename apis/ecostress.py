@@ -1,5 +1,6 @@
 import collections
 import getpass
+import math
 import os
 import re
 import shutil
@@ -20,6 +21,9 @@ from apis.ecostress_conv.ECOSTRESS_swath2grid import main
 from glob import glob
 import xml.etree.ElementTree as ET
 import multiprocessing as mp
+from sqlalchemy.orm import Session
+from sqlalchemy import extract, and_, create_engine
+from database.tables import engine, File, Pixel
 
 import bs4
 import certifi
@@ -196,6 +200,63 @@ class BaseAPI:
         file_bbox = self._parse_bbox_from_xml(xml_url)
         return file_bbox.intersects(target_bbox)
 
+    @staticmethod
+    def _create_raster(output_path: str, columns: int, rows: int, n_band: int = 1,
+                       gdal_data_type: int = gdal.GDT_Float32, driver: str = r'GTiff'):
+        """
+        Credit:
+        https://gis.stackexchange.com/questions/290776/how-to-create-a-tiff-file-using-gdal-from-a-numpy-array-and-
+        specifying-nodata-va
+
+        Creates a blank raster for data to be written to
+        Args:
+            output_path (str): Path where the output tif file will be written to
+            columns (int): Number of columns in raster
+            rows (int): Number of rows in raster
+            n_band (int): Number of bands in raster
+            gdal_data_type (int): Data type for data written to raster
+            driver (str): Driver for conversion
+        """
+        # create driver
+        driver = gdal.GetDriverByName(driver)
+
+        output_raster = driver.Create(output_path, columns, rows, n_band, eType=gdal_data_type)
+        return output_raster
+
+    @staticmethod
+    def _numpy_array_to_raster(output_path: str, numpy_array: np.array, geo_transform,
+                               projection, n_bands: int = 1, no_data: int = np.nan,
+                               gdal_data_type: int = gdal.GDT_Float32):
+        """
+        Returns a gdal raster data source
+        Args:
+            output_path (str): Full path to the raster to be written to disk
+            numpy_array (np.array): Numpy array containing data to write to raster
+            geo_transform (gdal GeoTransform): tuple of six values that represent the top left corner coordinates, the
+            pixel size in x and y directions, and the rotation of the image
+            n_bands (int): The band to write to in the output raster
+            no_data (int): Value in numpy array that should be treated as no data
+            gdal_data_type (int): Gdal data type of raster (see gdal documentation for list of values)
+        """
+        rows, columns = numpy_array.shape[0], numpy_array.shape[1]
+
+        # create output raster
+        output_raster = BaseAPI._create_raster(output_path, int(columns), int(rows), n_bands, gdal_data_type)
+
+        output_raster.SetProjection(projection)
+        output_raster.SetGeoTransform(geo_transform)
+        for i in range(n_bands):
+            output_band = output_raster.GetRasterBand(i + 1)
+            output_band.SetNoDataValue(no_data)
+            output_band.WriteArray(numpy_array[:, :, i] if numpy_array.ndim == 3 else numpy_array)
+            output_band.FlushCache()
+            output_band.ComputeStatistics(False)
+
+        if not os.path.exists(output_path):
+            raise Exception('Failed to create raster: %s' % output_path)
+
+        return output_path
+
 
 class L4WUE(BaseAPI):
 
@@ -204,6 +265,8 @@ class L4WUE(BaseAPI):
         common_regex = r'\_(?P<orbit>\d{5})\_(?P<scene_id>\d{3})\_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})\_(?P<build_id>\d{4})\_(?P<version>\d{2})\.h5$'
         self._wue_file_re = r'ECOSTRESS\_L4\_WUE' + common_regex
         self._bgeo_file_re = r'ECOSTRESS\_L1B\_GEO' + common_regex
+        self._wue_tif_re = r'ECOSTRESS\_L4\_WUE' + common_regex.replace('.h5', '_WUEavg_GEO.tif')
+        self._res = 0.0006298419
 
     @staticmethod
     def _get_last_day_of_month(year, month):
@@ -255,22 +318,6 @@ class L4WUE(BaseAPI):
                     day, url = result
                     geo_lookup[day].append(url)
 
-        # urls = []
-        # geo_lookup = collections.defaultdict(list)
-        # for day_url in day_urls:
-        #     day_files = self.retrieve_links(day_url)
-        #     for day_file in day_files:
-        #         match = re.match(self._wue_file_re, day_file)
-        #         if match:
-        #             groups = match.groupdict()
-        #             if hour_start <= int(groups['hour']) < hour_end:
-        #                 url = urllib.parse.urljoin(day_url, day_file)
-        #                 if self._overlaps_bbox(bbox, url + '.xml'):
-        #                     geo_lookup[os.path.basename(day_url[:-1])].append(url)
-        #                     urls.append(url)
-        #                 else:
-        #                     print('Doesnt overlap')
-
         # Now find the GEO urls. The versions are not always the same (this doesn't matter for the swath2grid function)
         # so you cannot infer the GEO url from the WUE url. What should match is the orbit, scene_id, and date.
         paired_urls = []
@@ -293,55 +340,65 @@ class L4WUE(BaseAPI):
 
         return paired_urls
 
-    @staticmethod
-    def _create_composite(in_dir: str, out_file: str):
-        # Get a list of all the geotif images in the specified directory
-        image_list = glob(os.path.join(in_dir, '*.tif'))
+    def _create_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
+                          bbox: List[int], out_file: str):
+        with Session(bind=engine) as session:
+            # First get all the files, filtering on the hour month and bounding box
+            min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-        if not image_list:
-            raise FileNotFoundError(f'No tif files found in {in_dir}')
+            files = session.query(File).filter(
+                and_(
+                    extract('hour', File.timestamp) >= hour_start,
+                    extract('hour', File.timestamp) < hour_end
+                )
+            ).filter(
+                and_(
+                    extract('month', File.timestamp) >= month_start,
+                    extract('month', File.timestamp) <= month_end
+                )
+            ).filter(
+                extract('year', File.timestamp) == year
+            ).filter(
+                and_(
+                    File.min_lon < max_lon,
+                    File.max_lon > min_lon,
+                    File.min_lat < max_lat,
+                    File.max_lat > min_lat
+                )
+            ).all()
 
-        # Read the data from each image and store it in a list
-        image_data = []
-        x_size = None
-        y_size = None
-        # min_lat, max_lat, max_lon, min_lon = None, None, None, None
-        for image in image_list:
-            raster = rio.open(image)
-            image_data.append(raster)
-            # dataset = gdal.Open(image)
-            # gt = dataset.GetGeoTransform()
-            # # min_lat = gt[0] if min_lat is None or min_lat > gt[0] else min_lat
-            # # min_lon = gt[3] if min_lon is None or min_lon > gt[3] else min_lon
-            # # max_lat = gt[0] if max_lat is None or max_lat < gt[0] else max_lat
-            # # max_lon = gt[3] if max_lon is None or max_lon < gt[3] else max_lon
-            # x_size = dataset.RasterXSize if x_size is None else x_size
-            # y_size = dataset.RasterYSize if y_size is None else y_size
-            # image_data.append(dataset.ReadAsArray())
-        # print(min_lat, max_lat, max_lon, min_lon)
-        # median_image = np.median(image_data, axis=0)
+            # Create an empty array with 70m x 70m resolution
+            min_lon = min([f.min_lon for f in files])
+            max_lon = max([f.max_lon for f in files])
+            min_lat = min([f.min_lat for f in files])
+            max_lat = max([f.max_lat for f in files])
 
-        mosaic, output = merge(image_data, method='max')
+            n_rows = math.ceil(max_lat - min_lat) / self._res
+            n_cols = math.ceil(max_lon - min_lon) / self._res
 
-        output_meta = raster.meta.copy()
-        output_meta.update(
-            {"driver": "GTiff",
-             "height": mosaic.shape[1],
-             "width": mosaic.shape[2],
-             "transform": output,
-             }
-        )
+            mosaic_array = np.full((n_rows, n_cols), np.nan)
 
-        with rio.open(out_file, 'w', **output_meta) as m:
-            m.write(mosaic)
+            for i, row in enumerate(mosaic_array):
+                row_min_lat = min_lat + (i * self._res)
+                row_max_lat = row_min_lat + self._res
+                for j, col in enumerate(row):
+                    col_min_lon = col_min_lon + (j * self._res)
+                    col_max_lon = col_min_lon + self._res
 
-        # # Write the median composite image to a new geotif file
-        # driver = gdal.GetDriverByName('GTiff')
-        # output_dataset = driver.Create(out_file, dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Float32)
-        # output_dataset.SetGeoTransform(dataset.GetGeoTransform())
-        # output_dataset.SetProjection(dataset.GetProjection())
-        # output_dataset.GetRasterBand(1).WriteArray(median_image)
-        # output_dataset.FlushCache()
+                    pixels = session.query(Pixel).filter(
+                        and_(
+                            Pixel.latitude < row_max_lat,
+                            Pixel.latitude >= row_min_lat,
+                            Pixel.longitude < col_max_lon,
+                            Pixel.longitude >= col_min_lon
+                        )
+                    ).filter(
+                        Pixel.file.in_(files)
+                    ).all()
+
+                    mosaic_array[i, j] = np.nanmedian([p.value for p in pixels])
+
+        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, self._res])
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
@@ -350,6 +407,94 @@ class L4WUE(BaseAPI):
                 glob(os.path.join(os.path.dirname(os.path.dirname(dest)), 'geo_tiffs',
                                   os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
                                   '*' + '_WUEavg_GEO.tif')))
+
+    # Prepare data for multiprocessing
+    @staticmethod
+    def _prepare_pixel_data(array, gt, file_id):
+        pixel_data = []
+        for i, row in enumerate(array):
+            mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
+            for j, col in enumerate(row):
+                pixel_info = {
+                    'value': array[i, j],
+                    'latitude': mid_lat,
+                    'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2),
+                    'file_id': file_id
+                }
+                pixel_data.append(pixel_info)
+        return pixel_data
+
+    @staticmethod
+    def _insert_pixels(pixel_data):
+        pixel_data, session, batch = pixel_data
+
+        try:
+            pixels = []
+            for data in tqdm(pixel_data, total=len(pixel_data), desc=f'Processing batch {batch}'):
+                new_pixel = Pixel(
+                    value=data['value'],
+                    latitude=data['latitude'],
+                    longitude=data['longitude'],
+                    _file_id=data['file_id']  # Assuming 'file' is referenced by 'file_id'
+                )
+                pixels.append(new_pixel)
+            session.bulk_save_objects(pixels)
+            session.commit()
+        except Exception as e:
+            print(f"Error: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    def add_files_to_db(self, geo_tiff_dir):
+        with Session(bind=engine) as session:
+            for file in os.listdir(geo_tiff_dir):
+                match = re.match(self._wue_tif_re, file)
+                if match:
+                    params = match.groupdict()
+
+                    g = gdal.Open(os.path.join(geo_tiff_dir, file))
+                    gt = g.GetGeoTransform()
+                    array = g.ReadAsArray()
+
+                    existing_file = session.query(File).filter(File.name == file).first()
+                    if existing_file is not None:
+                        print('File already added')
+                        # TODO: May want to handle this differently in the future
+                        continue
+
+                    new_file = File(
+                        name=file,
+                        timestamp=datetime(year=int(params['year']), month=int(params['month']), day=int(params['day']),
+                                           hour=int(params['hour']), minute=int(params['minute']),
+                                           second=int(params['second'])),
+                        min_lon=gt[0],
+                        max_lon=gt[0] + (gt[1] * array.shape[0]),
+                        min_lat=gt[3],
+                        max_lat=gt[3] + (gt[5] * array.shape[1]),
+                        lon_res=gt[1],
+                        lat_res=gt[5]
+                    )
+
+                    session.add(new_file)
+                    session.flush()
+
+                    print('Adding new file')
+
+                    pixel_data = self._prepare_pixel_data(array, gt, new_file.id)
+                    chunk_size = len(pixel_data) // (mp.cpu_count() - 1)
+                    pixel_chunks = [pixel_data[i:i + chunk_size] for i in range(0, len(pixel_data), chunk_size)]
+                    print('sqlite:///' + os.path.join(self.PROJ_DIR, 'database', 'database.db'))
+                    for i, batch in enumerate(pixel_chunks):
+                        self._insert_pixels((batch, session, i))
+                    # with mp.Pool() as pool:
+                    #     list(tqdm(pool.imap(self._insert_pixels,
+                    #                         [(chunk, 'sqlite:///' + os.path.join(
+                    #                             self.PROJ_DIR, 'database', 'database.db'), i
+                    #                           ) for i, chunk in enumerate(pixel_chunks)]),
+                    #               total=len(pixel_chunks)))
+
+            session.commit()
 
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
                            out_file: str, bbox: List[int], batch_size: int = 50):
@@ -395,5 +540,4 @@ class L4WUE(BaseAPI):
                 main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
                 shutil.rmtree(batch_out_dir)
 
-        # Create the mosaic
-        self._create_composite(out_dir, out_file)
+        self.add_files_to_db(geo_tiff_dir)
