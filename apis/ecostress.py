@@ -1,5 +1,6 @@
 import collections
 import getpass
+import json
 import math
 import os
 import re
@@ -403,9 +404,9 @@ class L4WUE(BaseAPI):
         n_rows = int(math.ceil(max_lat - min_lat) / self._res)
         n_cols = int(math.ceil(max_lon - min_lon) / self._res)
 
-        combined_medians = collections.defaultdict(list)
+        combined_medians = []
         for file in matching_geo_tiffs:
-
+            combined_median = {}
             print(file)
             g = gdal.Open(file)
             a = g.ReadAsArray()
@@ -417,8 +418,10 @@ class L4WUE(BaseAPI):
                 lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5]))) / self._res)
                 for i in range(len(row)):
                     lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / self._res)
-                    combined_medians[(lat_index, lon_index)] = a[j, i]
+                    combined_median[(lat_index, lon_index)] = a[j, i]
                     progress.update(1)
+
+            combined_medians.append(combined_median)
 
         # pool = mp.Pool(mp.cpu_count() - 1)
         # combined_medians = combine_medians(pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
@@ -430,10 +433,10 @@ class L4WUE(BaseAPI):
         progress = tqdm(total=mosaic_array.size, desc='Mosaicing')
         for j in range(len(mosaic_array)):
             for i in range(len(mosaic_array[j])):
-                median = []
+                medians = []
                 for m in combined_medians:
-                    median.append(m.get((j, i), np.nan))
-                mosaic_array[(j, i)] = np.nanmedian(median)
+                    medians.append(m.get((j, i), np.nan))
+                mosaic_array[(j, i)] = np.nanmedian(medians)
                 progress.update(1)
 
         del combined_medians
