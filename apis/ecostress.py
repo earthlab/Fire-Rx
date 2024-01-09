@@ -35,33 +35,6 @@ from tqdm import tqdm
 from shapely.geometry import Polygon
 
 
-def process_file(file, max_lat, min_lon, res):
-    # Function to process a single file
-    medians = collections.defaultdict(list)
-    g = gdal.Open(file)
-    a = g.ReadAsArray()
-    geo_transform = g.GetGeoTransform()
-
-    progress = tqdm(total=a.size, desc=os.path.basename(file))
-
-    for j, row in enumerate(a):
-        lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5])) / res))
-        for i in range(len(row)):
-            lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / res)
-            medians[(lat_index, lon_index)].append(a[j, i])
-            progress.update(1)
-    return medians
-
-
-def combine_medians(results):
-    # Function to combine the results from all processes
-    combined_medians = collections.defaultdict(list)
-    for medians in results:
-        for key in tqdm(medians):
-            combined_medians[key].append(medians[key])
-    return combined_medians
-
-
 class BaseAPI:
     """
     Defines all the attributes and methods common to the child APIs.
@@ -373,8 +346,6 @@ class L4WUE(BaseAPI):
         i_start, i_end, j_start, j_end, min_lat, min_lon, res, matching_db = args
         region = np.empty((i_end - i_start, j_end - j_start), dtype=np.float32)
 
-        prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
-
         matching_db = [create_engine(m) for m in matching_db]
 
         for i in range(i_start, i_end):
@@ -397,7 +368,6 @@ class L4WUE(BaseAPI):
                         ).all()
                         vals += [p.value for p in pixels]
                 region[i - i_start, j - j_start] = np.nanmedian(vals)
-                prog.update(1)
 
         return i_start, j_start, region
 
@@ -448,7 +418,6 @@ class L4WUE(BaseAPI):
         # pool.join()
 
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
-        progress = tqdm(total=mosaic_array.size, desc='Mosaicing')
         # Define the number of regions (this could be the number of available CPU cores)
         num_regions = 7
 
@@ -471,7 +440,6 @@ class L4WUE(BaseAPI):
             mosaic_array[i_start:i_start + region.shape[0], j_start:j_start + region.shape[1]] = region
 
         # Assuming progress is a tqdm object
-        progress.update(mosaic_array.size)
 
         self._numpy_array_to_raster(out_file, mosaic_array,
                                     [min_lon, self._res, 0, max_lat, 0, -self._res],
@@ -505,7 +473,7 @@ class L4WUE(BaseAPI):
 
         try:
             pixels = []
-            for data in tqdm(pixel_data, total=len(pixel_data), desc=f'Processing batch {batch}'):
+            for data in pixel_data:
                 new_pixel = Pixel(
                     value=data['value'],
                     latitude=data['latitude'],
@@ -556,7 +524,7 @@ class L4WUE(BaseAPI):
 
             with Session(bind=engine) as session:
                 pixels = []
-                for i, row in enumerate(tqdm(array, total=array.shape[0], desc='Adding pixels')):
+                for i, row in enumerate(array):
                     mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
                     for j, col in enumerate(row):
                         # p = {
