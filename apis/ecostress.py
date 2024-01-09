@@ -546,6 +546,9 @@ class L4WUE(BaseAPI):
             db_file_path = os.path.join(db_dir, str(timestamp) + '_' + min_lon + '_' + max_lon + '_' + min_lat + '_'
                                         + max_lat + '_' + lon_res + '_' + lat_res + '.db')
 
+            if os.path.exists(db_file_path):
+                return
+
             engine = create_engine(f'sqlite:///{db_file_path}')
             Base.metadata.create_all(engine)
 
