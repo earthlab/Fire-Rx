@@ -12,7 +12,7 @@ from http.cookiejar import CookieJar
 from multiprocessing import Pool
 from multiprocessing import set_start_method
 from typing import Tuple, List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import calendar
 import subprocess as sp
 import h5py
@@ -20,6 +20,10 @@ from apis.ecostress_conv.ECOSTRESS_swath2grid import main
 from glob import glob
 import xml.etree.ElementTree as ET
 import multiprocessing as mp
+from sqlalchemy.orm import Session
+from sqlalchemy import extract, and_, create_engine
+from database.tables import Pixel, Base
+import time
 
 import bs4
 import certifi
@@ -289,6 +293,7 @@ class L4WUE(BaseAPI):
         self._wue_file_re = r'ECOSTRESS\_L4\_WUE' + common_regex
         self._bgeo_file_re = r'ECOSTRESS\_L1B\_GEO' + common_regex
         self._wue_tif_re = r'ECOSTRESS\_L4\_WUE' + common_regex.replace('.h5', '_WUEavg_GEO.tif')
+        self._db_re = r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\_(?P<min_lon>\-?\d+\.\d+)\_(?P<max_lon>\-?\d+\.\d+)\_(?P<min_lat>\-?\d+\.\d+)\_(?P<max_lat>\-?\d+\.\d+)\_(?P<lon_res>\-?\d+\.\d+)\_(?P<lat_res>\-?\d+\.\d+)\.db$'
         self._res = 0.0006298419
 
     @staticmethod
@@ -363,65 +368,78 @@ class L4WUE(BaseAPI):
 
         return paired_urls
 
+    @staticmethod
+    def process_region(args):
+        i_start, i_end, j_start, j_end, min_lat, min_lon, res, matching_db = args
+        region = np.empty((i_end - i_start, j_end - j_start), dtype=np.float32)
+
+        prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
+
+        matching_db = [create_engine(m) for m in matching_db]
+
+        for i in range(i_start, i_end):
+            row_min_lat = min_lat + (i * res)
+            row_max_lat = row_min_lat + res
+            for j in range(j_start, j_end):
+                col_min_lon = min_lon + (j * res)
+                col_max_lon = col_min_lon + res
+
+                vals = []
+                for engine in matching_db:
+                    with Session(bind=engine) as session:
+                        pixels = session.query(Pixel).filter(
+                            and_(
+                                Pixel.latitude < row_max_lat,
+                                Pixel.latitude >= row_min_lat,
+                                Pixel.longitude < col_max_lon,
+                                Pixel.longitude >= col_min_lon
+                            )
+                        ).all()
+                        vals += [p.value for p in pixels]
+                region[i - i_start, j - j_start] = np.nanmedian(vals)
+                prog.update(1)
+
+        return i_start, j_start, region
+
     def _create_composite(self, in_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
                           hour_end: int, bbox: List[int], out_file: str):
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-        matching_geo_tiffs = {}
-        for geo_tiff in os.listdir(in_dir):
-            match = re.match(self._wue_tif_re, geo_tiff)
+        matching_db = {}
+        for file in os.listdir(in_dir):
+            match = re.match(self._db_re, file)
             if match is not None:
                 group_dict = match.groupdict()
+                f_min_lon = float(group_dict['min_lon'])
+                f_max_lon = float(group_dict['max_lon'])
+                f_min_lat = float(group_dict['min_lat'])
+                f_max_lat = float(group_dict['max_lat'])
 
                 if (
                         hour_start <= int(group_dict['hour']) < hour_end and
                         month_start <= int(group_dict['month']) <= month_end and
-                        int(group_dict['year']) == year
+                        int(group_dict['year']) == year and
+                        f_min_lon < max_lon and
+                        f_max_lon > min_lon and
+                        f_min_lat < max_lat and
+                        f_max_lat > min_lat
                 ):
-                    file_path = os.path.join(in_dir, geo_tiff)
-                    g = gdal.Open(file_path)
-                    geo_transform = g.GetGeoTransform()
-                    y_dim, x_dim = g.ReadAsArray().shape
-
-                    f_min_lon, f_min_lat, f_max_lon, f_max_lat = (geo_transform[0],
-                                                                  geo_transform[3] + (geo_transform[5] * y_dim),
-                                                                  geo_transform[0] + (geo_transform[1] * x_dim),
-                                                                  geo_transform[3])
-
-                    if f_min_lon < max_lon and f_max_lon > min_lon and f_min_lat < max_lat and f_max_lat > min_lat:
-                        matching_geo_tiffs[file_path] = (f_min_lon, f_min_lat, f_max_lon, f_max_lat)
-
-        print(matching_geo_tiffs)
+                    matching_db[f'sqlite:///{os.path.join(in_dir, file)}'] = (f_min_lon, f_max_lon, f_min_lat, f_max_lat)
 
         # Create an empty array with 70m x 70m resolution
-        min_lon = min([c[0] for c in matching_geo_tiffs.values()])
-        max_lon = max([c[2] for c in matching_geo_tiffs.values()])
-        min_lat = min([c[1] for c in matching_geo_tiffs.values()])
-        max_lat = max([c[3] for c in matching_geo_tiffs.values()])
+        min_lon = min([c[0] for c in matching_db.values()])
+        max_lon = max([c[1] for c in matching_db.values()])
+        min_lat = min([c[2] for c in matching_db.values()])
+        max_lat = max([c[3] for c in matching_db.values()])
+
+        print(min_lon, max_lon, min_lat, max_lat)
 
         n_rows = int(math.ceil(max_lat - min_lat) / self._res)
         n_cols = int(math.ceil(max_lon - min_lon) / self._res)
 
-        combined_medians = []
-        for file in matching_geo_tiffs:
-            combined_median = {}
-            print(file)
-            g = gdal.Open(file)
-            a = g.ReadAsArray()
-            geo_transform = g.GetGeoTransform()
-
-            progress = tqdm(total=a.size, desc=os.path.basename(file))
-
-            for j, row in enumerate(a):
-                lat_index = int((max_lat - (geo_transform[3] + (j * geo_transform[5]))) / self._res)
-                for i in range(len(row)):
-                    lon_index = int(((geo_transform[0] + (i * geo_transform[1])) - min_lon) / self._res)
-                    combined_median[(lat_index, lon_index)] = a[j, i]
-                    progress.update(1)
-
-            combined_medians.append(combined_median)
+        print(n_rows, n_cols)
 
         # pool = mp.Pool(mp.cpu_count() - 1)
         # combined_medians = combine_medians(pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
@@ -431,18 +449,33 @@ class L4WUE(BaseAPI):
 
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
         progress = tqdm(total=mosaic_array.size, desc='Mosaicing')
-        for j in range(len(mosaic_array)):
-            for i in range(len(mosaic_array[j])):
-                medians = []
-                for m in combined_medians:
-                    medians.append(m.get((j, i), np.nan))
-                mosaic_array[(j, i)] = np.nanmedian(medians)
-                progress.update(1)
+        # Define the number of regions (this could be the number of available CPU cores)
+        num_regions = 7
 
-        del combined_medians
+        # Define the size of each region
+        region_height = n_rows // num_regions
+        region_width = n_cols
+
+        # Prepare arguments for each region
+        regions = []
+        for i in range(0, n_rows, region_height):
+            args = (i, min(i + region_height, n_rows), 0, n_cols, min_lat, min_lon, self._res, matching_db)
+            regions.append(args)
+
+        # Process each region in parallel
+        with Pool() as pool:
+            results = pool.map(self.process_region, regions)
+
+        # Combine the results
+        for i_start, j_start, region in results:
+            mosaic_array[i_start:i_start + region.shape[0], j_start:j_start + region.shape[1]] = region
+
+        # Assuming progress is a tqdm object
+        progress.update(mosaic_array.size)
 
         self._numpy_array_to_raster(out_file, mosaic_array,
-                                    [min_lon, self._res, 0, max_lat, 0, -self._res], g.GetProjection())
+                                    [min_lon, self._res, 0, max_lat, 0, -self._res],
+                                    [min_lon, self._res, 0, max_lat, 0, -self._res])
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
@@ -451,6 +484,109 @@ class L4WUE(BaseAPI):
                 glob(os.path.join(os.path.dirname(os.path.dirname(dest)), 'geo_tiffs',
                                   os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
                                   '*' + '_WUEavg_GEO.tif')))
+
+    @staticmethod
+    def _prepare_pixel_data(array, gt):
+        pixel_data = []
+        for i, row in enumerate(array):
+            mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
+            for j, col in enumerate(row):
+                pixel_info = {
+                    'value': array[i, j],
+                    'latitude': mid_lat,
+                    'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2)
+                }
+                pixel_data.append(pixel_info)
+        return pixel_data
+
+    @staticmethod
+    def _insert_pixels(pixel_data):
+        pixel_data, session, batch = pixel_data
+
+        try:
+            pixels = []
+            for data in tqdm(pixel_data, total=len(pixel_data), desc=f'Processing batch {batch}'):
+                new_pixel = Pixel(
+                    value=data['value'],
+                    latitude=data['latitude'],
+                    longitude=data['longitude'],
+                    _file_id=data['file_id']  # Assuming 'file' is referenced by 'file_id'
+                )
+                pixels.append(new_pixel)
+            session.bulk_save_objects(pixels)
+            session.commit()
+        except Exception as e:
+            print(f"Error: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
+    def _add_file_to_db(self, file_data):
+        file, geo_tiff_dir, db_dir = file_data
+        print('running')
+
+        match = re.match(self._wue_tif_re, file)
+        if match:
+            params = match.groupdict()
+
+            g = gdal.Open(os.path.join(geo_tiff_dir, file))
+            gt = g.GetGeoTransform()
+            array = g.ReadAsArray()
+
+            timestamp = datetime(year=int(params['year']), month=int(params['month']), day=int(params['day']),
+                                 hour=int(params['hour']), minute=int(params['minute']),
+                                 second=int(params['second']))
+            min_lon = str(gt[0])
+            max_lon = str(gt[0] + (gt[1] * array.shape[0]))
+            max_lat = str(gt[3])
+            min_lat = str(gt[3] + (gt[5] * array.shape[1]))
+            lon_res = str(gt[1])
+            lat_res = str(gt[5])
+
+            db_file_path = os.path.join(db_dir, str(timestamp) + '_' + min_lon + '_' + max_lon + '_' + min_lat + '_'
+                                        + max_lat + '_' + lon_res + '_' + lat_res + '.db')
+
+            engine = create_engine(f'sqlite:///{db_file_path}')
+            Base.metadata.create_all(engine)
+
+            print('Adding new file')
+
+            with Session(bind=engine) as session:
+                pixels = []
+                for i, row in enumerate(tqdm(array, total=array.shape[0], desc='Adding pixels')):
+                    mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
+                    for j, col in enumerate(row):
+                        # p = {
+                        #     'value': array[i, j],
+                        #     'latitude': mid_lat,
+                        #     'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2)
+                        # }
+
+                        p = Pixel(
+                            value=array[i, j],
+                            latitude=mid_lat,
+                            longitude=gt[0] + (j * gt[1]) + (gt[1] / 2)
+                        )
+                        pixels.append(p)
+
+                        if len(pixels) >= 500000:
+                            session.bulk_save_objects(pixels)
+                            #session.commit()
+                            pixels.clear()
+
+                print('Added pixels')
+                session.bulk_save_objects(pixels)
+                session.commit()
+
+    def add_files_to_db(self, geo_tiff_dir, db_dir: str, n_tasks: int = mp.cpu_count() - 1):
+        args_list = [(file, geo_tiff_dir, db_dir) for file in os.listdir(geo_tiff_dir)]
+        with mp.Pool(processes=n_tasks) as pool:
+            # Use pool.imap_unordered to process the files in parallel
+            # Iterate over the imap_unordered iterator to start the tasks and wait for them to finish
+            for _ in pool.imap_unordered(self._add_file_to_db, args_list):
+                pass
+        # for arg in args_list:
+        #     self._add_file_to_db(arg)
 
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
                            out_file: str, bbox: List[int], batch_size: int = 50):
