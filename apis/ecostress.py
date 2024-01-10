@@ -419,6 +419,7 @@ class L4WUE(BaseAPI):
         # pool.join()
 
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
+        print(mosaic_array.size, 'SIZE')
         # Define the number of regions (this could be the number of available CPU cores)
         num_regions = 16
 
