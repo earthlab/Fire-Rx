@@ -372,14 +372,14 @@ class L4WUE(BaseAPI):
 
         return i_start, j_start, region
 
-    def _create_composite(self, in_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
+    def _create_composite(self, db_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
                           hour_end: int, bbox: List[int], out_file: str):
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
         matching_db = {}
-        for file in os.listdir(in_dir):
+        for file in os.listdir(db_dir):
             match = re.match(self._db_re, file)
             if match is not None:
                 group_dict = match.groupdict()
@@ -397,7 +397,7 @@ class L4WUE(BaseAPI):
                         f_min_lat < max_lat and
                         f_max_lat > min_lat
                 ):
-                    matching_db[f'sqlite:///{os.path.join(in_dir, file)}'] = (f_min_lon, f_max_lon, f_min_lat, f_max_lat)
+                    matching_db[f'sqlite:///{os.path.join(db_dir, file)}'] = (f_min_lon, f_max_lon, f_min_lat, f_max_lat)
 
         # Create an empty array with 70m x 70m resolution
         min_lon = min([c[0] for c in matching_db.values()])
