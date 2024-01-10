@@ -368,6 +368,7 @@ class L4WUE(BaseAPI):
                         ).all()
                         vals += [p.value for p in pixels]
                 region[i - i_start, j - j_start] = np.nanmedian(vals)
+                del vals
 
         return i_start, j_start, region
 
@@ -419,7 +420,7 @@ class L4WUE(BaseAPI):
 
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
         # Define the number of regions (this could be the number of available CPU cores)
-        num_regions = 7
+        num_regions = 16
 
         # Define the size of each region
         region_height = n_rows // num_regions
@@ -432,7 +433,7 @@ class L4WUE(BaseAPI):
             regions.append(args)
 
         # Process each region in parallel
-        with Pool() as pool:
+        with mp.Pool(processes=num_regions) as pool:
             results = pool.map(self.process_region, regions)
 
         # Combine the results
