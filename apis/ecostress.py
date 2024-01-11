@@ -34,7 +34,7 @@ import numpy as np
 from tqdm import tqdm
 from shapely.geometry import Polygon
 
-
+#l.download_composite(2021, 6, 8, 13, 17, 'test.tif', [-124.980469, 28.767659, -103.359375, 49.382373])
 class BaseAPI:
     """
     Defines all the attributes and methods common to the child APIs.
@@ -370,6 +370,9 @@ class L4WUE(BaseAPI):
                 region[i - i_start, j - j_start] = np.nanmedian(vals)
                 del vals
 
+            if i % 100000 == 0:
+                print(f'{i} / {i_end - i_start}')
+
         return i_start, j_start, region
 
     def _create_composite(self, db_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
@@ -421,7 +424,7 @@ class L4WUE(BaseAPI):
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
         print(mosaic_array.size, 'SIZE')
         # Define the number of regions (this could be the number of available CPU cores)
-        num_regions = 16
+        num_regions = 24
 
         # Define the size of each region
         region_height = n_rows // num_regions
