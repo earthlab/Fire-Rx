@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import urllib
+import warnings
 from argparse import Namespace
 from http.cookiejar import CookieJar
 from multiprocessing import Pool
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract, and_, create_engine
 from database.tables import Pixel, Base
 import time
+import matplotlib.pyplot as plt
 
 import bs4
 import certifi
@@ -346,8 +348,12 @@ class L4WUE(BaseAPI):
         i_start, i_end, j_start, j_end, min_lat, min_lon, res, matching_db = args
         region = np.empty((i_end - i_start, j_end - j_start), dtype=np.float32)
 
-        matching_db = [create_engine(m) for m in matching_db]
+        sorted_by_lon = sorted([(d, *v) for d, v in matching_db.items()], key=lambda x: x[1])
 
+        matching_db_engines = {m: create_engine(m) for m in matching_db}
+
+        #prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
+        t1 = time.time()
         for i in range(i_start, i_end):
             row_min_lat = min_lat + (i * res)
             row_max_lat = row_min_lat + res
@@ -356,8 +362,23 @@ class L4WUE(BaseAPI):
                 col_max_lon = col_min_lon + res
 
                 vals = []
-                for engine in matching_db:
-                    with Session(bind=engine) as session:
+                overlapping_lon_dbs = []
+                for d in sorted_by_lon:
+                    if d[1] > col_min_lon:
+                        break
+                    elif d[1] < col_min_lon < d[2]:
+                        overlapping_lon_dbs.append(d)
+
+                sorted_by_lat = sorted(overlapping_lon_dbs, key=lambda x: [3])
+                overlapping_dbs = []
+                for d in sorted_by_lat:
+                    if d[3] > row_min_lat:
+                        break
+                    elif d[3] < row_min_lat < d[4]:
+                        overlapping_dbs.append(d)
+
+                for db in overlapping_dbs:
+                    with Session(bind=matching_db_engines[db[0]]) as session:
                         pixels = session.query(Pixel).filter(
                             and_(
                                 Pixel.latitude < row_max_lat,
@@ -365,13 +386,21 @@ class L4WUE(BaseAPI):
                                 Pixel.longitude < col_max_lon,
                                 Pixel.longitude >= col_min_lon
                             )
+                        ).filter(
+                            Pixel.value.isnot(None)
                         ).all()
                         vals += [p.value for p in pixels]
-                region[i - i_start, j - j_start] = np.nanmedian(vals)
-                del vals
 
-            if i % 100000 == 0:
-                print(f'{i} / {i_end - i_start}')
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    region[i - i_start, j - j_start] = np.nanmedian(vals)
+
+                del vals
+                #prog.update(1)
+            if (i - i_start) % 10 == 0:
+                if (i - i_start) != 0:
+                    print(f'Region {i_start} {i} / {i_end - i_start} {time.time() - t1}')
+                    break
 
         return i_start, j_start, region
 
@@ -401,7 +430,7 @@ class L4WUE(BaseAPI):
                         f_max_lat > min_lat
                 ):
                     matching_db[f'sqlite:///{os.path.join(db_dir, file)}'] = (f_min_lon, f_max_lon, f_min_lat, f_max_lat)
-
+        print(len(matching_db))
         # Create an empty array with 70m x 70m resolution
         min_lon = min([c[0] for c in matching_db.values()])
         max_lon = max([c[1] for c in matching_db.values()])
@@ -424,7 +453,7 @@ class L4WUE(BaseAPI):
         mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
         print(mosaic_array.size, 'SIZE')
         # Define the number of regions (this could be the number of available CPU cores)
-        num_regions = 24
+        num_regions = 6
 
         # Define the size of each region
         region_height = n_rows // num_regions
@@ -440,15 +469,18 @@ class L4WUE(BaseAPI):
         with mp.Pool(processes=num_regions) as pool:
             results = pool.map(self.process_region, regions)
 
+        # results = []
+        # for region in regions:
+        #     results.append(self.process_region(region))
+
         # Combine the results
         for i_start, j_start, region in results:
             mosaic_array[i_start:i_start + region.shape[0], j_start:j_start + region.shape[1]] = region
 
         # Assuming progress is a tqdm object
 
-        self._numpy_array_to_raster(out_file, mosaic_array,
-                                    [min_lon, self._res, 0, max_lat, 0, -self._res],
-                                    [min_lon, self._res, 0, max_lat, 0, -self._res])
+        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, -self._res],
+                                    'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]')
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
