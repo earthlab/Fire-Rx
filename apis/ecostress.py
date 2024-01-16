@@ -352,7 +352,7 @@ class L4WUE(BaseAPI):
 
         matching_db_engines = {m: create_engine(m) for m in matching_db}
 
-        #prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
+        prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
         t1 = time.time()
         for i in range(i_start, i_end):
             row_min_lat = min_lat + (i * res)
@@ -396,11 +396,10 @@ class L4WUE(BaseAPI):
                     region[i - i_start, j - j_start] = np.nanmedian(vals)
 
                 del vals
-                #prog.update(1)
-            if (i - i_start) % 10 == 0:
+                prog.update(1)
+            if (i - i_start) % 1 == 0:
                 if (i - i_start) != 0:
-                    print(f'Region {i_start} {i} / {i_end - i_start} {time.time() - t1}')
-                    break
+                    print(f'Region {i_start} {i} / {i_end} {time.time() - t1}')
 
         return i_start, j_start, region
 
@@ -439,8 +438,8 @@ class L4WUE(BaseAPI):
 
         print(min_lon, max_lon, min_lat, max_lat)
 
-        n_rows = int(math.ceil(max_lat - min_lat) / self._res)
-        n_cols = int(math.ceil(max_lon - min_lon) / self._res)
+        n_rows = int((max_lat - min_lat) / self._res)
+        n_cols = int((max_lon - min_lon) / self._res)
 
         print(n_rows, n_cols)
 
@@ -542,9 +541,9 @@ class L4WUE(BaseAPI):
                                  hour=int(params['hour']), minute=int(params['minute']),
                                  second=int(params['second']))
             min_lon = str(gt[0])
-            max_lon = str(gt[0] + (gt[1] * array.shape[0]))
+            max_lon = str(gt[0] + (gt[1] * array.shape[1]))
             max_lat = str(gt[3])
-            min_lat = str(gt[3] + (gt[5] * array.shape[1]))
+            min_lat = str(gt[3] + (gt[5] * array.shape[0]))
             lon_res = str(gt[1])
             lat_res = str(gt[5])
 
