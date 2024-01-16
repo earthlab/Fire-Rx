@@ -270,6 +270,7 @@ class L4WUE(BaseAPI):
         self._wue_tif_re = r'ECOSTRESS\_L4\_WUE' + common_regex.replace('.h5', '_WUEavg_GEO.tif')
         self._db_re = r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\_(?P<min_lon>\-?\d+\.\d+)\_(?P<max_lon>\-?\d+\.\d+)\_(?P<min_lat>\-?\d+\.\d+)\_(?P<max_lat>\-?\d+\.\d+)\_(?P<lon_res>\-?\d+\.\d+)\_(?P<lat_res>\-?\d+\.\d+)\.db$'
         self._res = 0.0006298419
+        self._projection = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]'
 
     @staticmethod
     def _get_last_day_of_month(year, month):
@@ -343,98 +344,75 @@ class L4WUE(BaseAPI):
 
         return paired_urls
 
-    @staticmethod
-    def process_region(args):
-        i_start, i_end, j_start, j_end, min_lat, min_lon, res, matching_db = args
-        region = np.empty((i_end - i_start, j_end - j_start), dtype=np.float32)
+    # def process_region(self, overlapping_files: List[str], mosaic_array: np.array,
+    #                    region_bounds: Tuple[float, float, float, float], outfile: str):
+    def process_region(self, args):
+        overlapping_files, mosaic_array, region_bounds, outfile = args
+        region_min_lon, region_max_lon, region_min_lat, region_max_lat = region_bounds
 
-        sorted_by_lon = sorted([(d, *v) for d, v in matching_db.items()], key=lambda x: x[1])
+        index_to_median = collections.defaultdict(list)
+        for f_i, file in enumerate(overlapping_files):
+            g = gdal.Open(file)
+            gt = g.GetGeoTransform()
+            data = g.ReadAsArray()
 
-        matching_db_engines = {m: create_engine(m) for m in matching_db}
-
-        prog = tqdm(total=(i_end - i_start) * (j_end - j_start), desc=str(i_start))
-        t1 = time.time()
-        for i in range(i_start, i_end):
-            row_min_lat = min_lat + (i * res)
-            row_max_lat = row_min_lat + res
-            for j in range(j_start, j_end):
-                col_min_lon = min_lon + (j * res)
-                col_max_lon = col_min_lon + res
-
-                vals = []
-                overlapping_lon_dbs = []
-                for d in sorted_by_lon:
-                    if d[1] > col_min_lon:
-                        break
-                    elif d[1] < col_min_lon < d[2]:
-                        overlapping_lon_dbs.append(d)
-
-                sorted_by_lat = sorted(overlapping_lon_dbs, key=lambda x: [3])
-                overlapping_dbs = []
-                for d in sorted_by_lat:
-                    if d[3] > row_min_lat:
-                        break
-                    elif d[3] < row_min_lat < d[4]:
-                        overlapping_dbs.append(d)
-
-                for db in overlapping_dbs:
-                    with Session(bind=matching_db_engines[db[0]]) as session:
-                        pixels = session.query(Pixel).filter(
-                            and_(
-                                Pixel.latitude < row_max_lat,
-                                Pixel.latitude >= row_min_lat,
-                                Pixel.longitude < col_max_lon,
-                                Pixel.longitude >= col_min_lon
-                            )
-                        ).filter(
-                            Pixel.value.isnot(None)
-                        ).all()
-                        vals += [p.value for p in pixels]
-
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    region[i - i_start, j - j_start] = np.nanmedian(vals)
-
-                del vals
+            prog = tqdm(total=data.shape[0], desc=f'File {f_i + 1} / {len(overlapping_files)}')
+            for i, row in enumerate(data):
+                row_lat = gt[3] + (gt[5] * i)
+                if not region_min_lat <= row_lat <= region_max_lat:
+                    prog.update(1)
+                    continue
+                for j, column in enumerate(row):
+                    row_lon = gt[0] + (gt[1] * j)
+                    region_indices = (int((region_max_lat - row_lat) / self._res),
+                                      int((row_lon - region_min_lon) / self._res))
+                    index_to_median[region_indices].append(data[i, j])
                 prog.update(1)
-            if (i - i_start) % 1 == 0:
-                if (i - i_start) != 0:
-                    print(f'Region {i_start} {i} / {i_end} {time.time() - t1}')
 
-        return i_start, j_start, region
+        for k, v in index_to_median.items():
+            mosaic_array[k] = np.median(v)
 
-    def _create_composite(self, db_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
-                          hour_end: int, bbox: List[int], out_file: str):
+        mosaic_array = mosaic_array.astype(np.float32)
+        self._numpy_array_to_raster(
+            outfile, mosaic_array, [region_min_lon, self._res, 0, region_max_lat, 0, -self._res],
+            self._projection)
+
+    def _create_composite(self, file_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
+                          hour_end: int, bbox: List[int], out_dir: str):
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-        matching_db = {}
-        for file in os.listdir(db_dir):
-            match = re.match(self._db_re, file)
-            if match is not None:
-                group_dict = match.groupdict()
-                f_min_lon = float(group_dict['min_lon'])
-                f_max_lon = float(group_dict['max_lon'])
-                f_min_lat = float(group_dict['min_lat'])
-                f_max_lat = float(group_dict['max_lat'])
+        file_regions = {}
+        for file in os.listdir(file_dir):
+            if re.match(self._wue_tif_re, file):
+                file_path = os.path.join(file_dir, file)
+                g = gdal.Open(file_path)
+                gt = g.GetGeoTransform()
+                dim = g.ReadAsArray().shape
+                bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
+                file_regions[file_path] = bounds
 
-                if (
-                        hour_start <= int(group_dict['hour']) < hour_end and
-                        month_start <= int(group_dict['month']) <= month_end and
-                        int(group_dict['year']) == year and
-                        f_min_lon < max_lon and
-                        f_max_lon > min_lon and
-                        f_min_lat < max_lat and
-                        f_max_lat > min_lat
-                ):
-                    matching_db[f'sqlite:///{os.path.join(db_dir, file)}'] = (f_min_lon, f_max_lon, f_min_lat, f_max_lat)
-        print(len(matching_db))
+        matching_files = {}
+        for file, bounds in file_regions.items():
+            print(bounds)
+            group_dict = re.match(self._wue_tif_re, os.path.basename(file)).groupdict()
+            if (
+                    hour_start <= int(group_dict['hour']) < hour_end and
+                    month_start <= int(group_dict['month']) <= month_end and
+                    int(group_dict['year']) == year and
+                    bounds[0] < max_lon and
+                    bounds[1] > min_lon and
+                    bounds[2] < max_lat and
+                    bounds[3] > min_lat
+            ):
+                matching_files[file] = bounds
+
         # Create an empty array with 70m x 70m resolution
-        min_lon = min([c[0] for c in matching_db.values()])
-        max_lon = max([c[1] for c in matching_db.values()])
-        min_lat = min([c[2] for c in matching_db.values()])
-        max_lat = max([c[3] for c in matching_db.values()])
+        min_lon = min([c[0] for c in matching_files.values()])
+        max_lon = max([c[1] for c in matching_files.values()])
+        min_lat = min([c[2] for c in matching_files.values()])
+        max_lat = max([c[3] for c in matching_files.values()])
 
         print(min_lon, max_lon, min_lat, max_lat)
 
@@ -443,43 +421,36 @@ class L4WUE(BaseAPI):
 
         print(n_rows, n_cols)
 
-        # pool = mp.Pool(mp.cpu_count() - 1)
-        # combined_medians = combine_medians(pool.starmap(process_file, [(file, max_lat, min_lon, self._res) for file in
-        #                                                matching_geo_tiffs]))
-        # pool.close()
-        # pool.join()
-
-        mosaic_array = np.empty((n_rows, n_cols), dtype=np.float32)
-        print(mosaic_array.size, 'SIZE')
-        # Define the number of regions (this could be the number of available CPU cores)
-        num_regions = 6
+        # Define the number of regions
+        num_regions = 10
 
         # Define the size of each region
         region_height = n_rows // num_regions
-        region_width = n_cols
 
         # Prepare arguments for each region
-        regions = []
+        args = []
         for i in range(0, n_rows, region_height):
-            args = (i, min(i + region_height, n_rows), 0, n_cols, min_lat, min_lon, self._res, matching_db)
-            regions.append(args)
+            h = min(region_height, n_rows - i)
+            r_min_lat = min_lat + (i * self._res)
+            r_max_lat = min(max_lat, r_min_lat + (h * self._res))
+            r_outfile = os.path.join(out_dir, f'ECOSTRESS_L4_WUE_{min_lon}_{max_lon}_{r_min_lat}_{r_max_lat}_{i}.tif')
 
-        # Process each region in parallel
-        with mp.Pool(processes=num_regions) as pool:
-            results = pool.map(self.process_region, regions)
+            if os.path.exists(r_outfile):
+                continue
 
-        # results = []
-        # for region in regions:
-        #     results.append(self.process_region(region))
+            mosaic_array = np.empty((h, n_cols), dtype=np.float32)
 
-        # Combine the results
-        for i_start, j_start, region in results:
-            mosaic_array[i_start:i_start + region.shape[0], j_start:j_start + region.shape[1]] = region
+            overlapping_files = []
+            for file, bounds in matching_files.items():
+                if bounds[0] < max_lon and bounds[1] > min_lon and bounds[2] < r_max_lat and bounds[3] > r_min_lat:
+                    overlapping_files.append(file)
 
-        # Assuming progress is a tqdm object
+            args.append((overlapping_files, mosaic_array, (min_lon, max_lon, r_min_lat, r_max_lat), r_outfile))
 
-        self._numpy_array_to_raster(out_file, mosaic_array, [min_lon, self._res, 0, max_lat, 0, -self._res],
-                                    'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]')
+        t1 = time.time()
+        with mp.Pool(processes=6) as pool:
+            results = pool.map(self.process_region, args)
+        print(time.time() - t1)
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
