@@ -21,11 +21,8 @@ from apis.ecostress_conv.ECOSTRESS_swath2grid import main
 from glob import glob
 import xml.etree.ElementTree as ET
 import multiprocessing as mp
-from sqlalchemy.orm import Session
-from sqlalchemy import extract, and_, create_engine
 from database.tables import Pixel, Base
 import time
-import matplotlib.pyplot as plt
 
 import bs4
 import certifi
