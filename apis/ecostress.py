@@ -356,18 +356,21 @@ class L4WUE(BaseAPI):
             gt = g.GetGeoTransform()
             data = g.ReadAsArray()
 
-            prog = tqdm(total=data.shape[0], desc=f'File {f_i + 1} / {len(overlapping_files)}')
+            #prog = tqdm(total=data.shape[0], desc=f'File {f_i + 1} / {len(overlapping_files)}')
+            t1 = time.time()
             for i, row in enumerate(data):
                 row_lat = gt[3] + (gt[5] * i)
                 if not region_min_lat <= row_lat <= region_max_lat:
-                    prog.update(1)
+                    #prog.update(1)
                     continue
                 for j, column in enumerate(row):
                     row_lon = gt[0] + (gt[1] * j)
                     region_indices = (int((region_max_lat - row_lat) / self._res),
                                       int((row_lon - region_min_lon) / self._res))
                     index_to_median[region_indices].append(data[i, j])
-                prog.update(1)
+                #prog.update(1)
+                if i % 1000 == 0:
+                    print(f'{i} / {data.shape[0]} File {f_i + 1} / {len(overlapping_files)} {time.time() - t1}')
 
         for k, v in index_to_median.items():
             mosaic_array[k] = np.median(v)
@@ -378,7 +381,7 @@ class L4WUE(BaseAPI):
             self._projection)
 
     def _create_composite(self, file_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
-                          hour_end: int, bbox: List[int], out_dir: str):
+                          hour_end: int, bbox: List[int], out_dir: str, n_regions: int = 10, processes: int = 6):
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
@@ -422,7 +425,7 @@ class L4WUE(BaseAPI):
         print(n_rows, n_cols)
 
         # Define the number of regions
-        num_regions = 10
+        num_regions = n_regions
 
         # Define the size of each region
         region_height = n_rows // num_regions
@@ -448,9 +451,9 @@ class L4WUE(BaseAPI):
             args.append((overlapping_files, mosaic_array, (min_lon, max_lon, r_min_lat, r_max_lat), r_outfile))
 
         t1 = time.time()
-        with mp.Pool(processes=6) as pool:
+        with mp.Pool(processes=processes) as pool:
             results = pool.map(self.process_region, args)
-        print(time.time() - t1)
+        print(time.time() - t1, 'total time')
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
