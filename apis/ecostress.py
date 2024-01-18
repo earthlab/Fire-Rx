@@ -364,13 +364,14 @@ class L4WUE(BaseAPI):
                     row_lon = gt[0] + (gt[1] * j)
                     region_indices = (int((region_max_lat - row_lat) / self._res),
                                       int((row_lon - region_min_lon) / self._res))
-                    index_to_median[region_indices].append(data[i, j])
+                    val = data[i, j]
+                    index_to_median[region_indices].append(val if val >= 0 else np.nan)
                 #prog.update(1)
                 if i % 1000 == 0:
                     print(f'{i} / {data.shape[0]} File {f_i + 1} / {len(overlapping_files)} {time.time() - t1}')
 
         for k, v in index_to_median.items():
-            mosaic_array[k] = np.median(v)
+            mosaic_array[k] = np.nanmedian(v)
 
         mosaic_array = mosaic_array.astype(np.float32)
         self._numpy_array_to_raster(
@@ -395,7 +396,6 @@ class L4WUE(BaseAPI):
 
         matching_files = {}
         for file, bounds in file_regions.items():
-            print(bounds)
             group_dict = re.match(self._wue_tif_re, os.path.basename(file)).groupdict()
             if (
                     hour_start <= int(group_dict['hour']) < hour_end and
@@ -438,7 +438,7 @@ class L4WUE(BaseAPI):
             if os.path.exists(r_outfile):
                 continue
 
-            mosaic_array = np.empty((h, n_cols), dtype=np.float32)
+            mosaic_array = np.full((h, n_cols), np.nan)
 
             overlapping_files = []
             for file, bounds in matching_files.items():
@@ -495,66 +495,6 @@ class L4WUE(BaseAPI):
             session.rollback()
         finally:
             session.close()
-
-    def _add_file_to_db(self, file_data):
-        file, geo_tiff_dir, db_dir = file_data
-        print('running')
-
-        match = re.match(self._wue_tif_re, file)
-        if match:
-            params = match.groupdict()
-
-            g = gdal.Open(os.path.join(geo_tiff_dir, file))
-            gt = g.GetGeoTransform()
-            array = g.ReadAsArray()
-
-            timestamp = datetime(year=int(params['year']), month=int(params['month']), day=int(params['day']),
-                                 hour=int(params['hour']), minute=int(params['minute']),
-                                 second=int(params['second']))
-            min_lon = str(gt[0])
-            max_lon = str(gt[0] + (gt[1] * array.shape[1]))
-            max_lat = str(gt[3])
-            min_lat = str(gt[3] + (gt[5] * array.shape[0]))
-            lon_res = str(gt[1])
-            lat_res = str(gt[5])
-
-            db_file_path = os.path.join(db_dir, str(timestamp) + '_' + min_lon + '_' + max_lon + '_' + min_lat + '_'
-                                        + max_lat + '_' + lon_res + '_' + lat_res + '.db')
-
-            if os.path.exists(db_file_path):
-                return
-
-            engine = create_engine(f'sqlite:///{db_file_path}')
-            Base.metadata.create_all(engine)
-
-            print('Adding new file')
-
-            with Session(bind=engine) as session:
-                pixels = []
-                for i, row in enumerate(array):
-                    mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
-                    for j, col in enumerate(row):
-                        # p = {
-                        #     'value': array[i, j],
-                        #     'latitude': mid_lat,
-                        #     'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2)
-                        # }
-
-                        p = Pixel(
-                            value=array[i, j],
-                            latitude=mid_lat,
-                            longitude=gt[0] + (j * gt[1]) + (gt[1] / 2)
-                        )
-                        pixels.append(p)
-
-                        if len(pixels) >= 500000:
-                            session.bulk_save_objects(pixels)
-                            #session.commit()
-                            pixels.clear()
-
-                print('Added pixels')
-                session.bulk_save_objects(pixels)
-                session.commit()
 
     def add_files_to_db(self, geo_tiff_dir, db_dir: str, n_tasks: int = mp.cpu_count() - 1):
         args_list = [(file, geo_tiff_dir, db_dir) for file in os.listdir(geo_tiff_dir)]
