@@ -345,6 +345,7 @@ class L4WUE(BaseAPI):
     #                    region_bounds: Tuple[float, float, float, float], outfile: str):
     def process_region(self, args):
         overlapping_files, mosaic_array, region_bounds, outfile = args
+        print(region_bounds, len(overlapping_files))
         region_min_lon, region_max_lon, region_min_lat, region_max_lat = region_bounds
 
         index_to_median = collections.defaultdict(list)
