@@ -384,15 +384,24 @@ class L4WUE(BaseAPI):
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-        file_regions = {}
-        for file in os.listdir(file_dir):
-            if re.match(self._wue_tif_re, file):
-                file_path = os.path.join(file_dir, file)
-                g = gdal.Open(file_path)
-                gt = g.GetGeoTransform()
-                dim = g.ReadAsArray().shape
-                bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
-                file_regions[file_path] = bounds
+        file_region_path = os.path.join(self.PROJ_DIR, 'apis', 'file_regions.json')
+
+        if os.path.exists(file_region_path):
+            with open(file_region_path, 'r') as f:
+                file_regions = json.load(f)
+        else:
+            file_regions = {}
+            for file in os.listdir(file_dir):
+                if re.match(self._wue_tif_re, file):
+                    file_path = os.path.join(file_dir, file)
+                    g = gdal.Open(file_path)
+                    gt = g.GetGeoTransform()
+                    dim = g.ReadAsArray().shape
+                    bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
+                    file_regions[file_path] = bounds
+
+            with open(file_region_path, 'w+') as f:
+                json.dump(file_regions, f)
 
         matching_files = {}
         for file, bounds in file_regions.items():
@@ -444,7 +453,7 @@ class L4WUE(BaseAPI):
             for file, bounds in matching_files.items():
                 if bounds[0] < max_lon and bounds[1] > min_lon and bounds[2] < r_max_lat and bounds[3] > r_min_lat:
                     overlapping_files.append(file)
-
+            print(bounds, overlapping_files)
             args.append((overlapping_files, mosaic_array, (min_lon, max_lon, r_min_lat, r_max_lat), r_outfile))
 
         t1 = time.time()
