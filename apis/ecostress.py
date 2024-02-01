@@ -517,7 +517,7 @@ class L4WUE(BaseAPI):
         #     self._add_file_to_db(arg)
 
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
-                           out_file: str, bbox: List[int], batch_size: int = 50):
+                           bbox: List[int], batch_size: int = 50):
         set_start_method('fork')
 
         out_dir = os.path.join(self.PROJ_DIR, 'apis', f'{year}_{month_start}_{month_end}_{hour_start}_{hour_end}')
