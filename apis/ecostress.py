@@ -559,5 +559,3 @@ class L4WUE(BaseAPI):
             if os.listdir(batch_out_dir):
                 main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
                 shutil.rmtree(batch_out_dir)
-
-        self.add_files_to_db(geo_tiff_dir)
