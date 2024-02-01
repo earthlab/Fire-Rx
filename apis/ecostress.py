@@ -32,6 +32,9 @@ from osgeo import gdal
 import numpy as np
 from tqdm import tqdm
 from shapely.geometry import Polygon
+import rasterio
+from rasterio.merge import merge
+
 
 #l.download_composite(2021, 6, 8, 13, 17, 'test.tif', [-124.980469, 28.767659, -103.359375, 49.382373])
 class BaseAPI:
@@ -341,8 +344,6 @@ class L4WUE(BaseAPI):
 
         return paired_urls
 
-    # def process_region(self, overlapping_files: List[str], mosaic_array: np.array,
-    #                    region_bounds: Tuple[float, float, float, float], outfile: str):
     def process_region(self, args):
         overlapping_files, mosaic_array, region_bounds, outfile = args
         print(region_bounds, len(overlapping_files))
@@ -378,6 +379,39 @@ class L4WUE(BaseAPI):
         self._numpy_array_to_raster(
             outfile, mosaic_array, [region_min_lon, self._res, 0, region_max_lat, 0, -self._res],
             self._projection)
+
+    @staticmethod
+    def create_mosaic(in_dir: str, out_file: str):
+        # List all TIFF files in the directory
+        all_files = glob(os.path.join(in_dir, "*.tif"))
+
+        # List to hold opened raster datasets
+        src_files_to_mosaic = []
+
+        # Open and append each raster to the list
+        for fp in all_files:
+            src = rasterio.open(fp)
+            src_files_to_mosaic.append(src)
+
+        print(len(src_files_to_mosaic))
+
+        # Merge function returns a single mosaic array and the transformation info
+        mosaic, out_trans = merge(src_files_to_mosaic)
+        print(out_trans)
+
+        # Copy the metadata
+        out_meta = src.meta.copy()
+
+        # Update the metadata to reflect the number of layers in the mosaic
+        out_meta.update({"driver": "GTiff",
+                         "height": mosaic.shape[1],
+                         "width": mosaic.shape[2],
+                         "transform": out_trans
+                         })
+
+        # Write the mosaic raster to disk
+        with rasterio.open(out_file, "w", **out_meta) as dest:
+            dest.write(mosaic)
 
     def _create_composite(self, file_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
                           hour_end: int, bbox: List[int], out_dir: str, n_regions: int = 10, processes: int = 6):
@@ -470,52 +504,6 @@ class L4WUE(BaseAPI):
                                   os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
                                   '*' + '_WUEavg_GEO.tif')))
 
-    @staticmethod
-    def _prepare_pixel_data(array, gt):
-        pixel_data = []
-        for i, row in enumerate(array):
-            mid_lat = gt[3] + (i * gt[5]) + (gt[5] / 2)
-            for j, col in enumerate(row):
-                pixel_info = {
-                    'value': array[i, j],
-                    'latitude': mid_lat,
-                    'longitude': gt[0] + (j * gt[1]) + (gt[1] / 2)
-                }
-                pixel_data.append(pixel_info)
-        return pixel_data
-
-    @staticmethod
-    def _insert_pixels(pixel_data):
-        pixel_data, session, batch = pixel_data
-
-        try:
-            pixels = []
-            for data in pixel_data:
-                new_pixel = Pixel(
-                    value=data['value'],
-                    latitude=data['latitude'],
-                    longitude=data['longitude'],
-                    _file_id=data['file_id']  # Assuming 'file' is referenced by 'file_id'
-                )
-                pixels.append(new_pixel)
-            session.bulk_save_objects(pixels)
-            session.commit()
-        except Exception as e:
-            print(f"Error: {e}")
-            session.rollback()
-        finally:
-            session.close()
-
-    def add_files_to_db(self, geo_tiff_dir, db_dir: str, n_tasks: int = mp.cpu_count() - 1):
-        args_list = [(file, geo_tiff_dir, db_dir) for file in os.listdir(geo_tiff_dir)]
-        with mp.Pool(processes=n_tasks) as pool:
-            # Use pool.imap_unordered to process the files in parallel
-            # Iterate over the imap_unordered iterator to start the tasks and wait for them to finish
-            for _ in pool.imap_unordered(self._add_file_to_db, args_list):
-                pass
-        # for arg in args_list:
-        #     self._add_file_to_db(arg)
-
     def download_composite(self, year: int, month_start: int, month_end: int, hour_start: int, hour_end: int,
                            bbox: List[int], batch_size: int = 50):
         set_start_method('fork')
@@ -556,6 +544,6 @@ class L4WUE(BaseAPI):
                 self.download_time_series(geo_requests, batch_out_dir)
 
             # Convert them into TIFs
-            if os.listdir(batch_out_dir):
+            if geo_requests or wue_requests:
                 main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
                 shutil.rmtree(batch_out_dir)
