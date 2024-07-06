@@ -13,7 +13,6 @@ import h5py
 import os
 import pyproj
 import sys
-import argparse
 import math
 import numpy as np
 import warnings
@@ -23,21 +22,6 @@ from pyresample import geometry as geom
 from pyresample import kd_tree as kdt
 from osgeo import gdal, gdal_array, gdalconst, osr
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
-# --------------------------COMMAND LINE ARGUMENTS AND ERROR HANDLING---------------------------- #
-# Set up argument and error handling
-# parser = argparse.ArgumentParser(description='Performs ECOSTRESS Swath to Grid Conversion')
-# parser.add_argument('--proj', required=True, choices=['UTM', 'GEO'], help='Projection desired for output GeoTIFFs')
-# parser.add_argument('--dir', required=True, help='Local directory containing ECOSTRESS Swath files to be processed')
-# parser.add_argument('--out_dir', required=True, help='Directory where output files will be written')
-# parser.add_argument('--sds', required=False, help='Specific science datasets (SDS) to extract from ECOSTRESS Granules \
-#                     (see README for a list of available SDS)')
-# parser.add_argument('--utmzone', required=False, help='UTM zone (EPSG Code) desired for all outputs--only required if needed to \
-#                     override default UTM zone which is assigned based on the center location for each ECOSTRESS granule')
-# parser.add_argument('--bt', required=False, help='Optional argument to convert radiance to brightness temperature \
-#                     for the L1B products', action='store_true')
-#
-# args = parser.parse_args()
 
 def main(args):
 
@@ -64,8 +48,8 @@ def main(args):
         os.makedirs(outDir)
 
     # Create lists of ECOSTRESS HDF-EOS5 files (geo, data) in the directory
-    geoList = [f for f in os.listdir() if f.startswith('ECO') and f.endswith('.h5') and 'GEO' in f]
-    ecoList = [f for f in os.listdir() if f.startswith('ECO') and f.endswith('.h5') and 'GEO' not in f]
+    geoList = [os.path.join(inDir, f) for f in os.listdir(inDir) if f.startswith('ECO') and f.endswith('.h5') and 'GEO' in f]
+    ecoList = [os.path.join(inDir, f) for f in os.listdir(inDir) if f.startswith('ECO') and f.endswith('.h5') and 'GEO' not in f]
 
     # Check to verify if any ECOSTRESS files are in the directory provided
     if len(ecoList) == 0:
@@ -83,50 +67,11 @@ def main(args):
             epsg_code = '327' + utm
         return epsg_code
 
-
-    # If brightness temperature is requested, define a function to convert radiance to BT
-    if args.bt:
-        def btConversion(s, ecoSD):
-            try:
-                # Look up table containing brightness temperature conversions coefficients
-                lutFile = h5py.File('EcostressBrightnessTemperatureV01.h5', "r")
-            except:
-                try:
-                    lutFile = h5py.File(f'{scriptDir}EcostressBrightnessTemperatureV01.h5', "r")
-                except:
-                    print('Brightness Temp LUT not found, download the table at https://git.earthdata.nasa.gov/projects/LPDUR/repos/ecostress_swath2grid/browse and make sure it is in the same directory as the ECOSTRESS files to be processed or the ECOSTRESS_swath2grid.py script.')
-                    sys.exit(2)
-            # Open the lookup table for the desired radiance band
-            lut = lutFile[f"/lut/radiance_{s[-1]}"][()].astype(float)
-            lutFile.close()
-
-            # Take the input radiance array, and map to bt conversion coefficient depending on radiance band and value
-            ecoSDflat = ecoSD.flatten()
-            ecoSDflat = np.where(np.logical_and(0 <= ecoSDflat, ecoSDflat <= 60), ecoSDflat, 0)  # Filter fill values
-            indexLUT = np.int32(ecoSDflat / 0.001)
-
-            # Interpolate the LUT values for each radiance based on two nearest LUT values
-            bt = np.empty(ecoSDflat.shape, dtype=ecoSDflat.dtype)
-            radiance_x0 = indexLUT * 0.001
-            radiance_x1 = radiance_x0 + 0.001
-            factor0 = (radiance_x1 - ecoSDflat) / 0.001
-            factor1 = (ecoSDflat - radiance_x0) / 0.001
-            bt[:] = (factor0 * lut[indexLUT]) + (factor1 * lut[indexLUT + 1])
-
-            # Set out of range radiance and fill values back to fill value
-            bt = np.where((ecoSDflat != 0), bt, fv)
-            bt = bt.reshape(ecoSD.shape)
-            return bt
-
-    if args.utmzone is not None and args.utmzone[0:3] != '326' and args.utmzone[0:3] != '327':
-        parser.error('--utmzone requires the EPSG code (http://spatialreference.org/ref/epsg/) for a UTM zone, and only WGS84 datum is supported')
-    # ------------------------------------IMPORT ECOSTRESS FILE-------------------------------------- #
-    # Batch process all files in the input directory
     for i, e in enumerate(ecoList):
         i += 1
         print('Processing: {} ({} of {})'.format(e, str(i), str(len(ecoList))))
         f = h5py.File(e, "r")             # Read in ECOSTRESS HDF5-EOS data file
-        ecoName = e.split('.h5')[0]       # Keep original filename
+        ecoName = os.path.basename(e.split('.h5')[0])       # Keep original filename
         eco_objs = []
         f.visit(eco_objs.append)          # Retrieve list of datasets
 
@@ -150,7 +95,7 @@ def main(args):
                 continue
         else:
     # ---------------------------------IMPORT GEOLOCATION FILE--------------------------------------- #
-            geo = [g for g in geoList if e[-37:-10] in g]  # Match GEO filename--updated to exclude build ID
+            geo = [g for g in geoList if os.path.basename(e)[-37:-10] in g]  # Match GEO filename--updated to exclude build ID
             if len(geo) != 0 or 'L1B_MAP' in e:         # Proceed if GEO/MAP file
                 if 'L1B_MAP' in e:
                     g = f                               # Map file contains lat/lon
@@ -215,7 +160,6 @@ def main(args):
                 continue
 
     # ------------------LOOP THROUGH SDS CONVERT SWATH2GRID AND APPLY GEOREFERENCING----------------- #
-        print(ecoSDS)
         for s in ecoSDS:
             ecoSD = f[s][()]  # Create array and read dimensions
 
@@ -243,11 +187,6 @@ def main(args):
                 add_off = f[s].attrs[addoffName[0]][0]
             except:
                 add_off = 0
-
-            # Convert to brightness temperature if bt argument is set, product is L1B, and SDS is Radiance
-            if args.bt and 'RAD' in e:
-                if 'radiance' in s:
-                    ecoSD = btConversion(s, ecoSD)
 
             if 'ALEXI_USDA' in e:  # USDA Contains proj info in metadata
                 if 'ET' in e:
@@ -287,7 +226,6 @@ def main(args):
             height, width = sdGEO.shape  # Define geotiff dimensions
             driv = gdal.GetDriverByName('GTiff')
             dataType = gdal_array.NumericTypeCodeToGDALTypeCode(sdGEO.dtype)
-            print(outName)
             d = driv.Create(outName, width, height, 1, dataType)
             d.SetGeoTransform(gt)
 
