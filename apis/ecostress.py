@@ -38,7 +38,7 @@ from timezonefinder import TimezoneFinder
 import pandas as pd
 
 -109.138184,36.923548,-101.942139,41.071069
-# l.download_composite(2021, 6, 8, 13, 17, 'test.tif', [-124.980469, 28.767659, -103.359375, 49.382373])
+l.download_composite(2021, 6, 8, 13, 17, 'test.tif', [-124.980469, 28.767659, -103.359375, 49.382373], esi=False)
 # l.download_composite(2021, 6, 8, 13, 17, 'test.tif', [-125.0, 39.0, -117.0, 44.0])
 class BaseAPI:
     """
@@ -524,8 +524,7 @@ class L4(BaseAPI):
         with rasterio.open(out_file, "w", **out_meta) as dest:
             dest.write(mosaic)
 
-    def _create_composite(self, file_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
-                          hour_end: int, bbox: List[int], out_dir: str, output_type: str,
+    def _create_composite(self, file_dir: str, year: int, bbox: List[int], out_dir: str, output_type: str,
                           n_regions: int = 10, processes: int = 6):
         if output_type == 'WUE':
             output_re = self._wue_tif_re
@@ -537,6 +536,7 @@ class L4(BaseAPI):
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
+        print('Finding cloud files')
         cloud_file_dict = {}
         for file in os.listdir(file_dir):
             match = re.match(self._cloud_file_tif_re, file)
@@ -554,14 +554,13 @@ class L4(BaseAPI):
                 bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
                 file_regions[file_path] = bounds
 
+        print('Matching files')
         matching_files = {}
         matching_cloud_files = {}
         for file, bounds in file_regions.items():
-            group_dict = re.match(self._wue_tif_re, os.path.basename(file)).groupdict()
+            group_dict = re.match(output_re, os.path.basename(file)).groupdict()
             key = self._generate_file_key(group_dict)
             if (
-                    hour_start <= int(group_dict['hour']) < hour_end and
-                    month_start <= int(group_dict['month']) <= month_end and
                     int(group_dict['year']) == year and
                     bounds[0] < max_lon and
                     bounds[1] > min_lon and
@@ -587,6 +586,7 @@ class L4(BaseAPI):
         region_height = n_rows // num_regions
 
         # Prepare arguments for each region
+        print('Preparing regions')
         args = []
         for i in range(0, n_rows, region_height):
             h = min(region_height, n_rows - i)
@@ -607,6 +607,7 @@ class L4(BaseAPI):
                 overlapping_files, matching_cloud_files, mosaic_array, (min_lon, max_lon, r_min_lat, r_max_lat),
                 r_outfile))
 
+        print('Processing regions')
         with mp.Pool(processes=processes) as pool:
             results = pool.map(self.process_region, args)
 
