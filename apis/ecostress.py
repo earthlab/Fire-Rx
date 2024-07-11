@@ -525,7 +525,14 @@ class L4(BaseAPI):
             dest.write(mosaic)
 
     def _create_composite(self, file_dir: str, year: int, month_start: int, month_end: int, hour_start: int,
-                          hour_end: int, bbox: List[int], out_dir: str, n_regions: int = 10, processes: int = 6):
+                          hour_end: int, bbox: List[int], out_dir: str, output_type: str,
+                          n_regions: int = 10, processes: int = 6):
+        if output_type == 'WUE':
+            output_re = self._wue_tif_re
+            output_prefix = 'ECOSTRESS_L4_WUE_'
+        elif output_type == 'ESI':
+            output_re = self._esi_tif_re
+            output_prefix = 'ECOSTRESS_L4_ESI_PT-JPL_'
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
@@ -539,7 +546,7 @@ class L4(BaseAPI):
 
         file_regions = {}
         for file in os.listdir(file_dir):
-            if re.match(self._wue_tif_re, file):
+            if re.match(output_re, file):
                 file_path = os.path.join(file_dir, file)
                 g = gdal.Open(file_path)
                 gt = g.GetGeoTransform()
@@ -585,7 +592,7 @@ class L4(BaseAPI):
             h = min(region_height, n_rows - i)
             r_min_lat = min_lat + (i * self._res)
             r_max_lat = min(max_lat, r_min_lat + (h * self._res))
-            r_outfile = os.path.join(out_dir, f'ECOSTRESS_L4_WUE_{min_lon}_{max_lon}_{r_min_lat}_{r_max_lat}_{i}.tif')
+            r_outfile = os.path.join(out_dir, f'{output_prefix}{min_lon}_{max_lon}_{r_min_lat}_{r_max_lat}_{i}.tif')
 
             if os.path.exists(r_outfile):
                 continue
