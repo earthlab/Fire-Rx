@@ -402,7 +402,6 @@ class L4(BaseAPI):
 
         progress_df.to_csv(url_progress_file_path, index=False)
         progress_df = pd.read_csv(url_progress_file_path)
-        print(len(progress_df))
         geo_lookup = collections.defaultdict(list)
         for _, row in progress_df.iterrows():
             if ((not isinstance(row['geo_url'], str) or not isinstance(row['cloud_url'], str) or not
@@ -605,15 +604,16 @@ class L4(BaseAPI):
             results = pool.map(self.process_region, args)
 
     @staticmethod
-    def _generate_tif_name(h5_name: str):
+    def _h5_in_completed_files(h5_name: str, completed_files: List[str]):
         m = {
             '_WUE_': '_WUEavg_GEO.tif',
-            '_ESI_PT-JPL_': 'ESIavg_GEO.tif',
-            '_CLOUD_': 'CloudMask_GEO.tif'
+            '_ESI_PT-JPL_': '_ESIavg_GEO.tif',
+            '_CLOUD_': '_CloudMask_GEO.tif'
         }
         for k, v in m.items():
             if k in h5_name:
-                return h5_name.replace('.h5', v)
+                return h5_name.replace('.h5', v) in completed_files
+        return False
 
     @staticmethod
     def _tif_file_exists(dest: str) -> bool:
@@ -624,10 +624,10 @@ class L4(BaseAPI):
                                   '*' + '_WUEavg_GEO.tif')))
 
     def download_composite(self, years: List[int], month_start: int, month_end: int, hour_start: int, hour_end: int,
-                           bbox: List[int], batch_size: int = 50):
+                           bbox: List[int], esi: bool = True, batch_size: int = 50):
         set_start_method('fork')
 
-        out_dir = os.path.join(self.PROJ_DIR, 'apis',
+        out_dir = os.path.join(self.PROJ_DIR, 'data',
                                f"{'_'.join([str(y) for y in years])}_{month_start}_{month_end}_{hour_start}_{hour_end}")
         os.makedirs(out_dir, exist_ok=True)
 
@@ -667,34 +667,34 @@ class L4(BaseAPI):
             os.makedirs(batch_out_dir, exist_ok=True)
             wue_requests, esi_requests, cloud_requests, geo_requests = [], [], [], []
             for url_set in url_batch:
-                print(os.path.basename(url_set[0]), self._generate_tif_name(os.path.basename(url_set[0])) in completed_files)
-                if self._generate_tif_name(os.path.basename(url_set[0])) not in completed_files:
+                f = False
+                if isinstance(url_set[0], str) and not self._h5_in_completed_files(os.path.basename(url_set[0]), completed_files):
+                    f = True
                     wue_requests.append((url_set[0], os.path.join(batch_out_dir, os.path.basename(url_set[0]))))
-                if self._generate_tif_name(os.path.basename(url_set[1])) not in completed_files:
+                if esi and isinstance(url_set[1], str) and not self._h5_in_completed_files(os.path.basename(url_set[1]), completed_files):
+                    f = True
                     esi_requests.append((url_set[1], os.path.join(batch_out_dir, os.path.basename(url_set[1]))))
-                if self._generate_tif_name(os.path.basename(url_set[2])) not in completed_files:
+                if isinstance(url_set[2], str) and not self._h5_in_completed_files(os.path.basename(url_set[2]), completed_files):
+                    f = True
                     cloud_requests.append((url_set[2], os.path.join(batch_out_dir, os.path.basename(url_set[2]))))
-                if not all(self._generate_tif_name(url_set[i]) in completed_files for i in range(3)):
+                if isinstance(url_set[3], str) and f:
                     geo_requests.append((url_set[3], os.path.join(batch_out_dir, os.path.basename(url_set[3]))))
-
-            print(wue_requests)
 
             if wue_requests:
                 print(f'Downloading WUE requests {wue_requests}')
-                self.download_time_series(wue_requests[1:2], batch_out_dir)
+                self.download_time_series(wue_requests, batch_out_dir)
 
             if geo_requests:
                 print(f'Downloading GEO requests {geo_requests}')
-                print(geo_requests)
-                self.download_time_series(geo_requests[1:2], batch_out_dir)
+                self.download_time_series(geo_requests, batch_out_dir)
 
             if cloud_requests:
                 print(f'Downloading CLOUD requests {cloud_requests}')
-                self.download_time_series(cloud_requests[1:2], batch_out_dir)
+                self.download_time_series(cloud_requests, batch_out_dir)
 
             if esi_requests:
                 print(f'Downloading ESI requests {esi_requests}')
-                self.download_time_series(esi_requests[1:2], batch_out_dir)
+                self.download_time_series(esi_requests, batch_out_dir)
 
             # Convert them into TIFs
             if geo_requests or wue_requests or cloud_requests or esi_requests:
