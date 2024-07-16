@@ -461,7 +461,7 @@ class L4(BaseAPI):
         return mask
 
     def process_region(self, args):
-        overlapping_files, matching_cloud_files, mosaic_array, region_bounds, outfile = args
+        overlapping_files, mosaic_array, valid_lower_bound, valid_upper_bound, region_bounds, outfile = args
         region_min_lon, region_max_lon, region_min_lat, region_max_lat = region_bounds
 
         index_to_median = collections.defaultdict(list)
@@ -469,9 +469,6 @@ class L4(BaseAPI):
             g = gdal.Open(file)
             gt = g.GetGeoTransform()
             data = g.ReadAsArray()
-
-            cloud_file = gdal.Open(matching_cloud_files[file])
-            cloud_mask = self._create_cloud_mask(cloud_file.ReadAsArray())
 
             t1 = time.time()
             for i, row in enumerate(data):
@@ -483,7 +480,8 @@ class L4(BaseAPI):
                     region_indices = (int((region_max_lat - row_lat) / self._res),
                                       int((row_lon - region_min_lon) / self._res))
                     val = data[i, j]
-                    index_to_median[region_indices].append(val if val >= 0 and not cloud_mask[i, j] else np.nan)
+                    index_to_median[region_indices].append(val if valid_lower_bound <= val <= valid_upper_bound
+                                                           else np.nan)
                 if i % 1000 == 0:
                     print(f'{i} / {data.shape[0]} File {f_i + 1} / {len(overlapping_files)} {time.time() - t1}')
 
@@ -494,6 +492,7 @@ class L4(BaseAPI):
         self._numpy_array_to_raster(
             outfile, mosaic_array, [region_min_lon, self._res, 0, region_max_lat, 0, -self._res],
             self._projection)
+        del mosaic_array
 
     @staticmethod
     def create_mosaic(in_dir: str, out_file: str):
@@ -530,21 +529,18 @@ class L4(BaseAPI):
         if output_type == 'WUE':
             output_re = self._wue_tif_re
             output_prefix = 'ECOSTRESS_L4_WUE_'
+            valid_lower_bound = 0
+            valid_upper_bound = 20
         elif output_type == 'ESI':
             output_re = self._esi_tif_re
             output_prefix = 'ECOSTRESS_L4_ESI_PT-JPL_'
+            valid_lower_bound = 0
+            valid_upper_bound = 2
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
 
-        print('Finding cloud files')
-        cloud_file_dict = {}
-        for file in os.listdir(file_dir):
-            match = re.match(self._cloud_file_tif_re, file)
-            if match:
-                key = self._generate_file_key(match.groupdict())
-                cloud_file_dict[key] = os.path.join(file_dir, file)
-
+        print('Finding file regions')
         file_regions = {}
         for file in os.listdir(file_dir):
             if re.match(output_re, file):
@@ -554,22 +550,20 @@ class L4(BaseAPI):
                 dim = g.ReadAsArray().shape
                 bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
                 file_regions[file_path] = bounds
+                del g
 
         print('Matching files')
         matching_files = {}
-        matching_cloud_files = {}
         for file, bounds in file_regions.items():
             group_dict = re.match(output_re, os.path.basename(file)).groupdict()
-            key = self._generate_file_key(group_dict)
             if (
                     int(group_dict['year']) == year and
                     bounds[0] < max_lon and
                     bounds[1] > min_lon and
                     bounds[2] < max_lat and
                     bounds[3] > min_lat
-            ) and key in cloud_file_dict:
+            ):
                 matching_files[file] = bounds
-                matching_cloud_files[file] = cloud_file_dict[key]
 
         # Create an empty array with 70m x 70m resolution
         min_lon = min([c[0] for c in matching_files.values()])
@@ -604,9 +598,8 @@ class L4(BaseAPI):
             for file, bounds in matching_files.items():
                 if bounds[0] < max_lon and bounds[1] > min_lon and bounds[2] < r_max_lat and bounds[3] > r_min_lat:
                     overlapping_files.append(file)
-            args.append((
-                overlapping_files, matching_cloud_files, mosaic_array, (min_lon, max_lon, r_min_lat, r_max_lat),
-                r_outfile))
+            args.append((overlapping_files, mosaic_array, valid_lower_bound, valid_upper_bound,
+                         (min_lon, max_lon, r_min_lat, r_max_lat), r_outfile))
 
         print('Processing regions')
         with mp.Pool(processes=processes) as pool:
