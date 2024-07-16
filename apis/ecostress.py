@@ -312,7 +312,7 @@ class L4(BaseAPI):
         self._esi_file_re = r'ECOSTRESS\_L4\_ESI\_PT-JPL' + common_regex
         self._cloud_file_tif_re = r'ECOSTRESS\_L2\_CLOUD' + common_regex.replace('.h5', '_CloudMask_GEO.tif')
         self._wue_tif_re = r'ECOSTRESS\_L4\_WUE' + common_regex.replace('.h5', '_WUEavg_GEO.tif')
-        self._esi_tif_re = r'ECOSTRESS\_L4\_ESI\_PT-JPL' + common_regex.replace('.h5', 'ESI_PT-JPLavg_GEO.tif')
+        self._esi_tif_re = r'ECOSTRESS\_L4\_ESI\_PT-JPL' + common_regex.replace('.h5', '_ESIavg_GEO.tif')
         self._db_re = r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\_(?P<min_lon>\-?\d+\.\d+)\_(?P<max_lon>\-?\d+\.\d+)\_(?P<min_lat>\-?\d+\.\d+)\_(?P<max_lat>\-?\d+\.\d+)\_(?P<lon_res>\-?\d+\.\d+)\_(?P<lat_res>\-?\d+\.\d+)\.db$'
         self._res = 0.0006298419
         self._projection = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]'
