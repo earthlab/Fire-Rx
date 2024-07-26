@@ -544,20 +544,21 @@ class L4(BaseAPI):
         file_regions = {}
         for file in os.listdir(file_dir):
             if re.match(output_re, file):
-                file_path = os.path.join(file_dir, file)
-                g = gdal.Open(file_path)
-                gt = g.GetGeoTransform()
-                dim = g.ReadAsArray().shape
-                bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
-                file_regions[file_path] = bounds
-                del g
+                group_dict = re.match(output_re, file)
+                if int(group_dict['year']) == year:
+                    file_path = os.path.join(file_dir, file)
+                    g = gdal.Open(file_path)
+                    gt = g.GetGeoTransform()
+                    dim = g.ReadAsArray().shape
+                    bounds = gt[0], gt[0] + (gt[1] * dim[1]), gt[3] + (gt[5] * dim[0]), gt[3]
+                    file_regions[file_path] = bounds
+                    del g
 
         print('Matching files')
         matching_files = {}
         for file, bounds in file_regions.items():
             group_dict = re.match(output_re, os.path.basename(file)).groupdict()
             if (
-                    int(group_dict['year']) == year and
                     bounds[0] < max_lon and
                     bounds[1] > min_lon and
                     bounds[2] < max_lat and
@@ -706,3 +707,5 @@ class L4(BaseAPI):
                 with open(completed_files_path, 'w') as f:
                     f.writelines(list(set(completed_files + [file + '\n' for file in os.listdir(geo_tiff_dir)])))
                 shutil.rmtree(batch_out_dir)
+
+# Marine regions of the world for next set of analysis
