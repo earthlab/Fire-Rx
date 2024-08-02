@@ -484,6 +484,7 @@ class Elevation(BaseAPI):
             transform, width, height = calculate_default_transform(src.crs, self.get_utm_epsg(lat, lon), src.width, src.height, *src.bounds)
             kwargs = src.meta.copy()
             kwargs.update({
+                'driver': 'GTiff',
                 'crs': self.get_utm_epsg(lat, lon),
                 'transform': transform,
                 'width': width,
@@ -516,7 +517,6 @@ class Elevation(BaseAPI):
                 source_crs, target_crs, src.width, src.height, *src.bounds)
             kwargs = src.meta.copy()
             kwargs.update({
-                'driver': 'GTiff',
                 'crs': target_crs,
                 'transform': transform,
                 'width': width,
