@@ -478,10 +478,10 @@ class Elevation(BaseAPI):
         :param target_crs: The target CRS (default is UTM zone 33N).
         """
         lon, lat = self._get_top_left_coordinate_from_filename(input_tif)
-
+        print(lon, lat)
         with rasterio.open(input_tif) as src:
-            transform, width, height = calculate_default_transform(
-                src.crs, self.get_utm_epsg(lat, lon), src.width, src.height, *src.bounds)
+            print(self.get_utm_epsg(lat, lon))
+            transform, width, height = calculate_default_transform(src.crs, self.get_utm_epsg(lat, lon), src.width, src.height, *src.bounds)
             kwargs = src.meta.copy()
             kwargs.update({
                 'crs': self.get_utm_epsg(lat, lon),
@@ -489,6 +489,7 @@ class Elevation(BaseAPI):
                 'width': width,
                 'height': height
             })
+            print(kwargs)
 
             with rasterio.open(output_tif, 'w', **kwargs) as dst:
                 for i in range(1, src.count + 1):
@@ -499,7 +500,7 @@ class Elevation(BaseAPI):
                         src_crs=src.crs,
                         dst_transform=transform,
                         dst_crs=self.get_utm_epsg(lat, lon),
-                        resampling=Resampling.nearest)
+                        resampling=Resampling.bilinear)
 
     def rd_elevation_to_slope(self, elevation_file, slope_outfile):
         elevation_meters = self.reproject_to_meters(elevation_file, 'temp.tif')
