@@ -503,7 +503,7 @@ class Elevation(BaseAPI):
                         dst_crs=self.get_utm_epsg(lat, lon),
                         resampling=Resampling.nearest)
 
-    def reproject_to_latlon(self, input_tif, output_tif, source_crs, target_crs):
+    def reproject_to_latlon(self, input_tif, output_tif, target_crs):
         """
         Reproject a raster file to latitude/longitude (EPSG:4326).
 
@@ -514,7 +514,7 @@ class Elevation(BaseAPI):
         """
         with rasterio.open(input_tif) as src:
             transform, width, height = calculate_default_transform(
-                source_crs, target_crs, src.width, src.height, *src.bounds)
+                src.crs, target_crs, src.width, src.height, *src.bounds)
             kwargs = src.meta.copy()
             kwargs.update({
                 'crs': target_crs,
@@ -529,7 +529,7 @@ class Elevation(BaseAPI):
                         source=rasterio.band(src, i),
                         destination=rasterio.band(dst, i),
                         src_transform=src.transform,
-                        src_crs=source_crs,
+                        src_crs=src.crs,
                         dst_transform=transform,
                         dst_crs=target_crs,
                         resampling=Resampling.nearest)
@@ -543,10 +543,11 @@ class Elevation(BaseAPI):
         geo_transform = meters_dataset.GetGeoTransform()
         projection = meters_dataset.GetProjection()
 
-        original_dataset = gdal.Open(elevation_file)
+        with rasterio.open(elevation_file) as f:
+            target_crs = f.crs
 
         self._numpy_array_to_raster('temp2.tif', slope, geo_transform, projection, no_data=-9999)
-        self.reproject_to_latlon('temp2.tif', slope_outfile, meters_dataset.crs, original_dataset)
+        self.reproject_to_latlon('temp2.tif', slope_outfile, target_crs)
         os.remove('temp1.tif')
         os.remove('temp2.tif')
 
