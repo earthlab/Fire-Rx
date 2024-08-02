@@ -535,6 +535,16 @@ class Elevation(BaseAPI):
                         resampling=Resampling.nearest)
 
     def rd_derive_from_elevation(self, elevation_file, slope_outfile, attrib: str):
+        """
+        A Slope calculation (degrees)
+        C Horn, B.K.P., 1981. Hill shading and the reflectance map. Proceedings of the IEEE 69, 14–47. doi:10.1109/PROC.1981.11918
+        A Aspect attribute calculation
+        C Horn, B.K.P., 1981. Hill shading and the reflectance map. Proceedings of the IEEE 69, 14–47. doi:10.1109/PROC.1981.11918
+        :param elevation_file:
+        :param slope_outfile:
+        :param attrib:
+        :return:
+        """
         elevation_meters = self.reproject_to_meters(elevation_file, 'temp1.tif')
         f = rd.LoadGDAL('temp1.tif')
         slope = rd.TerrainAttribute(f, attrib=attrib)
@@ -551,34 +561,38 @@ class Elevation(BaseAPI):
         os.remove('temp1.tif')
         os.remove('temp2.tif')
 
-    def elevation_to_slope(self, elevation_file: str, slope_outfile: str):
-        image = gdal.Open(elevation_file)
-        elevation_data = image.ReadAsArray()  # Measured in meters
-        dx, dy = 30.87, 30.87  # 1 arc second in meters
-        x_slope, y_slope = np.gradient(elevation_data, dx, dy)
-        slope = np.sqrt(x_slope ** 2 + y_slope ** 2)
+    def merge_tif_files(self, input_directory, output_tif):
+        """
+        Merge multiple TIFF files into a single TIFF file.
 
-        # Calculate in degrees
-        slope_deg = np.rad2deg(np.arctan(slope))
+        :param input_directory: Directory containing the input TIFF files.
+        :param output_tif: Path to the output merged TIFF file.
+        """
+        # List to store opened datasets
+        src_files_to_mosaic = []
 
-        dataset = gdal.Open(elevation_file)
-        geo_transform = dataset.GetGeoTransform()
-        projection = dataset.GetProjection()
+        # Iterate over all files in the directory
+        for file in os.listdir(input_directory):
+            src_path = os.path.join(input_directory, file)
+            src = rasterio.open(src_path)
+            src_files_to_mosaic.append(src)
 
-        self._numpy_array_to_raster(slope_outfile, slope_deg, geo_transform, projection)
+        # Merge function
+        mosaic, out_trans = rasterio.merge.merge(src_files_to_mosaic)
 
-    def elevation_to_aspect(self, elevation_file: str, aspect_outfile: str):
-        image = gdal.Open(elevation_file)
-        elevation_data = image.ReadAsArray()  # Measured in meters
-        dx, dy = 30.87, 30.87  # 1 arc second in meters
-        x_grad, y_grad = np.gradient(elevation_data, dx, dy)
-        aspect = np.arctan2(-x_grad, y_grad) * (180 / np.pi)
+        # Copy metadata
+        out_meta = src.meta.copy()
+        out_meta.update({
+            "driver": "GTiff",
+            "height": mosaic.shape[1],
+            "width": mosaic.shape[2],
+            "transform": out_trans
+        })
 
-        # Convert aspect to compass direction (0 to 360 degrees)
-        aspect = np.where(aspect < 0, 360 + aspect, aspect)
+        # Write the mosaic raster to disk
+        with rasterio.open(output_tif, "w", **out_meta) as dest:
+            dest.write(mosaic)
 
-        dataset = gdal.Open(elevation_file)
-        geo_transform = dataset.GetGeoTransform()
-        projection = dataset.GetProjection()
-
-        self._numpy_array_to_raster(aspect_outfile, aspect, geo_transform, projection)
+        # Close all source files
+        for src in src_files_to_mosaic:
+            src.close()
