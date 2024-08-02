@@ -500,19 +500,54 @@ class Elevation(BaseAPI):
                         src_crs=src.crs,
                         dst_transform=transform,
                         dst_crs=self.get_utm_epsg(lat, lon),
-                        resampling=Resampling.bilinear)
+                        resampling=Resampling.nearest)
+
+    def reproject_to_latlon(self, input_tif, output_tif, source_crs, target_crs):
+        """
+        Reproject a raster file to latitude/longitude (EPSG:4326).
+
+        :param input_tif: Path to the input TIFF file (in meters).
+        :param output_tif: Path to the output TIFF file (in lat/lon).
+        :param source_crs: The source CRS.
+        :param target_crs: The target CRS (lat/lon).
+        """
+        with rasterio.open(input_tif) as src:
+            transform, width, height = calculate_default_transform(
+                source_crs, target_crs, src.width, src.height, *src.bounds)
+            kwargs = src.meta.copy()
+            kwargs.update({
+                'crs': target_crs,
+                'transform': transform,
+                'width': width,
+                'height': height
+            })
+
+            with rasterio.open(output_tif, 'w', **kwargs) as dst:
+                for i in range(1, src.count + 1):
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=source_crs,
+                        dst_transform=transform,
+                        dst_crs=target_crs,
+                        resampling=Resampling.nearest)
 
     def rd_elevation_to_slope(self, elevation_file, slope_outfile):
-        elevation_meters = self.reproject_to_meters(elevation_file, 'temp.tif')
-        f = rd.LoadGDAL('temp.tif')
-        slope = rd.TerrainAttribute(f, attrib='slope_riserun')
+        elevation_meters = self.reproject_to_meters(elevation_file, 'temp1.tif')
+        f = rd.LoadGDAL('temp1.tif')
+        slope = rd.TerrainAttribute(f, attrib='slope_degrees')
 
-        dataset = gdal.Open(elevation_file)
-        geo_transform = dataset.GetGeoTransform()
-        projection = dataset.GetProjection()
+        meters_dataset = gdal.Open('temp1.tif')
+        geo_transform = meters_dataset.GetGeoTransform()
+        projection = meters_dataset.GetProjection()
 
-        self._numpy_array_to_raster(slope_outfile, slope, geo_transform, projection)
-        os.remove('temp.tif')
+        original_dataset = gdal.Open(elevation_file)
+
+        self._numpy_array_to_raster('temp2.tif', slope, geo_transform, projection, no_data=-9999)
+        self.reproject_to_latlon('temp2.tif', slope_outfile, meters_dataset.crs, original_dataset)
+        os.remove('temp1.tif')
+        os.remove('temp2.tif')
 
     def elevation_to_slope(self, elevation_file: str, slope_outfile: str):
         image = gdal.Open(elevation_file)
