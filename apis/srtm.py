@@ -534,10 +534,10 @@ class Elevation(BaseAPI):
                         dst_crs=target_crs,
                         resampling=Resampling.nearest)
 
-    def rd_elevation_to_slope(self, elevation_file, slope_outfile):
+    def rd_derive_from_elevation(self, elevation_file, slope_outfile, attrib: str):
         elevation_meters = self.reproject_to_meters(elevation_file, 'temp1.tif')
         f = rd.LoadGDAL('temp1.tif')
-        slope = rd.TerrainAttribute(f, attrib='slope_degrees')
+        slope = rd.TerrainAttribute(f, attrib=attrib)
 
         meters_dataset = gdal.Open('temp1.tif')
         geo_transform = meters_dataset.GetGeoTransform()
