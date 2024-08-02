@@ -5,26 +5,22 @@ curvature data.
 
 import getpass
 import math
-import multiprocessing as mp
 import os
 import re
 import shutil
-import tempfile
 import urllib
-from abc import ABC
 from argparse import Namespace
 from http.cookiejar import CookieJar
 from typing import Tuple, List
 
 import numpy as np
 import rasterio
-import yaml
 from netCDF4 import Dataset
 from osgeo import gdal
 from osgeo import osr, ogr
 from rasterio.merge import merge
-from PIL import Image
-from tqdm import tqdm
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+import richdem as rd
 
 
 def _base_download_task(task_args: Namespace) -> None:
@@ -154,11 +150,11 @@ class BaseAPI:
         self._username, self._password = self._get_auth_credentials()
 
     @staticmethod
-    def get_utm_epsg(lat, lon):
+    def get_utm_epsg(lat, lon) -> str:
         utm_zone = int((lon + 180) // 6) + 1
         epsg_code = 32600 if lat >= 0 else 32700
         epsg_code += utm_zone
-        return epsg_code
+        return 'EPSG:' + str(epsg_code)
 
     @staticmethod
     def _create_raster(output_path: str, columns: int, rows: int, n_band: int = 1,
@@ -472,6 +468,50 @@ class Elevation(BaseAPI):
                 file_names.append(f"{lat.upper()}{lon.upper()}.SRTMGL1.hgt.zip")
 
         return file_names
+
+    def reproject_to_meters(self, input_tif, output_tif):
+        """
+        Reproject a raster file to a specified CRS (in meters).
+
+        :param input_tif: Path to the input TIFF file (in lat/lon).
+        :param output_tif: Path to the output TIFF file (in meters).
+        :param target_crs: The target CRS (default is UTM zone 33N).
+        """
+        lon, lat = self._get_top_left_coordinate_from_filename(input_tif)
+
+        with rasterio.open(input_tif) as src:
+            transform, width, height = calculate_default_transform(
+                src.crs, self.get_utm_epsg(lat, lon), src.width, src.height, *src.bounds)
+            kwargs = src.meta.copy()
+            kwargs.update({
+                'crs': self.get_utm_epsg(lat, lon),
+                'transform': transform,
+                'width': width,
+                'height': height
+            })
+
+            with rasterio.open(output_tif, 'w', **kwargs) as dst:
+                for i in range(1, src.count + 1):
+                    reproject(
+                        source=rasterio.band(src, i),
+                        destination=rasterio.band(dst, i),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs=self.get_utm_epsg(lat, lon),
+                        resampling=Resampling.nearest)
+
+    def rd_elevation_to_slope(self, elevation_file, slope_outfile):
+        elevation_meters = self.reproject_to_meters(elevation_file, 'temp.tif')
+        f = rd.LoadGDAL('temp.tif')
+        slope = rd.TerrainAttribute(f, attrib='slope_riserun')
+
+        dataset = gdal.Open(elevation_file)
+        geo_transform = dataset.GetGeoTransform()
+        projection = dataset.GetProjection()
+
+        self._numpy_array_to_raster(slope_outfile, slope, geo_transform, projection)
+        os.remove('temp.tif')
 
     def elevation_to_slope(self, elevation_file: str, slope_outfile: str):
         image = gdal.Open(elevation_file)
