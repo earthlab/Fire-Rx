@@ -39,6 +39,12 @@ which overlap the specified bounding box. The median of the time series is then 
 Progress is saved when finding overlapping files in case the process needs to be restarted.
 
 # SRTM elevation data
+The SRTM data can be downloaded and filtered by a bounding box. You can use the
+bin/create_elevation_slope_aspect_composites.py like so to create an elevation, slope, and aspect file
+```bash
+python bin/create_elevation_slope_aspect_composites.py --bbox -105 40 -104 41
+```
+
 
 ## slope and aspect data
 
