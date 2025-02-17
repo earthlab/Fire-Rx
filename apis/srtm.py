@@ -12,6 +12,7 @@ import urllib
 from argparse import Namespace
 from http.cookiejar import CookieJar
 from typing import Tuple, List
+import zipfile
 
 import numpy as np
 import rasterio
@@ -31,7 +32,7 @@ def _base_download_task(task_args: Namespace) -> None:
             task_args.link (str): URL to datafile on servers
             task_args.username (str): NASA EarthData username
             task_args.password (str): NASA EarthData password
-            task_args.dest (str): Path to where the data will be written
+            task_args.dest (str): Path to where the data will be written (a .zip file)
     """
     try:
         link = task_args.link
@@ -55,8 +56,18 @@ def _base_download_task(task_args: Namespace) -> None:
                     fd.write(chunk)
                 else:
                     break
+
+        # If the destination file is a ZIP file, extract it and then delete the ZIP file.
+        if task_args.dest.lower().endswith('.zip'):
+            extract_dir = os.path.dirname(task_args.dest)
+            with zipfile.ZipFile(task_args.dest, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            os.remove(task_args.dest)
+            print(f"Extracted and removed {task_args.dest}")
+
     except Exception as e:
         print(str(e))
+
 
 
 # Functions for elevation parallel data processing
@@ -82,57 +93,6 @@ def _elevation_download_task(task_args: Namespace) -> None:
     # Sometimes the files will not exist, as in the case of a swath over water
     if not os.path.exists(task_args.dest):
         return
-
-    #_nc_to_tif(task_args.dest, task_args.top_left_coord, task_args.out_dir)
-
-
-def _nc_to_tif(nc_path: str, top_left_coord: Tuple[float, float], out_dir: str,
-               cell_resolution: float = 0.000277777777777778) -> None:
-    """
-    Converts netCDF files to tif file. Band that will be transferred to tif file needs to be extracted and
-    geo-referencing needs to be added as well.
-    Args:
-        nc_path (str): Path to input netCDF file
-        top_left_coord (tuple): List giving coordinate of top left of image [lon, lat] so tif file can be geo-referenced
-        out_dir (str): Path to directory where tif file will be written
-        cell_resolution (float): Spatial resolution of tif file in degrees
-    """
-    # Open the netCDF file
-    nc_file = Dataset(nc_path)
-
-    # Read the data and metadata from the netCDF file
-    var = nc_file.variables['SRTMGL1_DEM'][:].squeeze()
-    x = nc_file.variables['lon'][:]
-    y = nc_file.variables['lat'][:]
-    crs = nc_file.variables['crs'].spatial_ref
-
-    # Define the output GeoTIFF file
-    tif_path = os.path.join(out_dir, os.path.basename(nc_path).replace('.nc', '.tif'))
-
-    # Create a new GeoTIFF file
-    driver = gdal.GetDriverByName('GTiff')
-    tif_dataset = driver.Create(tif_path, len(x), len(y), 1, gdal.GDT_Float32)
-
-    # Set the projection and transform of the GeoTIFF file
-    proj = osr.SpatialReference()
-    proj.ImportFromWkt(str(crs))
-    tif_dataset.SetProjection(proj.ExportToWkt())
-    tif_dataset.SetGeoTransform(
-        (top_left_coord[0],
-         cell_resolution,
-         0,
-         top_left_coord[1],
-         0,
-         -1 * cell_resolution)
-    )
-
-    # Write the data to the GeoTIFF file
-    tif_band = tif_dataset.GetRasterBand(1)
-    tif_band.WriteArray(var)
-
-    # Close the GeoTIFF file and netCDF file
-    tif_dataset = None
-    nc_file.close()
 
 
 class BaseAPI:
@@ -290,7 +250,7 @@ class Elevation(BaseAPI):
         """
         # Specify the input directory containing the TIFF files
         tiff_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if
-                      f.endswith('.tif')]  # Open all the TIFF files using rasterio
+                      f.endswith('.hgt')]  # Open all the TIFF files using rasterio
         src = None
         src_files_to_mosaic = []
         for file in tiff_files:
