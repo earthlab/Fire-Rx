@@ -1,4 +1,4 @@
-name: ecostress_2
+name: fire-rx
 channels:
   - conda-forge
   - defaults
@@ -27,3 +27,6 @@ dependencies:
   - pyproj
   - pyresample
   - tqdm
+  - timezonefinder
+  - netCDF4
+  - richdem
