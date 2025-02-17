@@ -349,7 +349,7 @@ class Elevation(BaseAPI):
         """
         infile = os.path.basename(infile)
 
-        match = re.search(r'^([NS])(\d{2})([EW])(\d{3})\.hgt$', infile, re.IGNORECASE)
+        match = re.search(r'^([NS])(\d{2})([EW])(\d{3})\.SRTMGL1\.hgt$', infile, re.IGNORECASE)
         if match:
             n_or_s = match.group(0)[0]
             e_or_w = match.group(0)[3]
@@ -422,17 +422,20 @@ class Elevation(BaseAPI):
 
         :param input_tif: Path to the input TIFF file (in lat/lon).
         :param output_tif: Path to the output TIFF file (in meters).
-        :param target_crs: The target CRS (default is UTM zone 33N).
         """
-        lon, lat = self._get_top_left_coordinate_from_filename(input_tif)
-        print(lon, lat)
         with rasterio.open(input_tif) as src:
-            print(self.get_utm_epsg(lat, lon))
-            transform, width, height = calculate_default_transform(src.crs, self.get_utm_epsg(lat, lon), src.width, src.height, *src.bounds)
+            # Instead of using the filename, get the top left coordinate from the geotransform.
+            # This returns a tuple (x, y) for the coordinate of pixel (0,0).
+            lon, lat = src.transform * (0, 0)
+            print(lon, lat)
+
+            utm_epsg = self.get_utm_epsg(lat, lon)
+            transform, width, height = calculate_default_transform(
+                src.crs, utm_epsg, src.width, src.height, *src.bounds)
             kwargs = src.meta.copy()
             kwargs.update({
                 'driver': 'GTiff',
-                'crs': self.get_utm_epsg(lat, lon),
+                'crs': utm_epsg,
                 'transform': transform,
                 'width': width,
                 'height': height
@@ -447,7 +450,7 @@ class Elevation(BaseAPI):
                         src_transform=src.transform,
                         src_crs=src.crs,
                         dst_transform=transform,
-                        dst_crs=self.get_utm_epsg(lat, lon),
+                        dst_crs=utm_epsg,
                         resampling=Resampling.nearest)
 
     def reproject_to_latlon(self, input_tif, output_tif, target_crs):
