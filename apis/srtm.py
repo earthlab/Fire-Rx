@@ -327,7 +327,7 @@ class Elevation(BaseAPI):
                 Namespace(
                     link=(os.path.join(self.BASE_URL, file_name)),
                     out_dir=out_dir,
-                    top_left_coord=self._get_top_left_coordinate_from_filename(file_name),
+                    top_left_coord=self._get_top_left_coordinate_from_filename(file_name.replace('.zip', '')),
                     username=self._username,
                     password=self._password
                 )
