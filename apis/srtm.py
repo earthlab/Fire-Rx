@@ -349,7 +349,7 @@ class Elevation(BaseAPI):
         """
         infile = os.path.basename(infile)
 
-        match = re.search(r"[nsNS](\d{2})[weWE](\d{3})", infile)
+        match = re.search(r'^([NS])(\d{2})([EW])(\d{3})\.hgt$', infile, re.IGNORECASE)
         if match:
             n_or_s = match.group(0)[0]
             e_or_w = match.group(0)[3]
