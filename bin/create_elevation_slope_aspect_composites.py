@@ -16,9 +16,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.out_dir is None:
-        out_dir = os.path.join(PROJ_DIR, 'data', 'srtm', f"{'_'.join([str(int(b)) for b in args.bbox])}")
+        out_dir = os.path.join(PROJ_DIR, 'data', 'srtm', f"srtm_{'_'.join([str(int(b)) for b in args.bbox])}")
     else:
         out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
 
     username = os.environ.get('FIRE_RX_USERNAME')
     password = os.environ.get('FIRE_RX_PASSWORD')

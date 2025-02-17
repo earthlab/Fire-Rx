@@ -251,6 +251,7 @@ class Elevation(BaseAPI):
         # Specify the input directory containing the TIFF files
         tiff_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if
                       f.endswith('.hgt')]  # Open all the TIFF files using rasterio
+        print(tiff_files)
         src = None
         src_files_to_mosaic = []
         for file in tiff_files:
@@ -265,6 +266,7 @@ class Elevation(BaseAPI):
                          "transform": out_trans
                          })  # Write the merged TIFF file to disk using rasterio
         with rasterio.open(output_file, "w", **out_meta) as dest:
+            print(output_file)
             dest.write(mosaic)
 
     def download_bbox(self, bbox: List[float], out_dir:str,  buffer: float = 0) -> None:
@@ -279,7 +281,7 @@ class Elevation(BaseAPI):
         self._download_bbox(bbox, out_dir, buffer)
 
         # 2) Create a composite of all tiffs in the temp_dir
-        self._mosaic_tif_files(out_dir, output_file='elevation.tif')
+        self._mosaic_tif_files(out_dir, output_file=os.path.join(out_dir, 'elevation.tif'))
 
     def lat_lon_to_meters(self, input_tiff: str):
         input_tiff_file = gdal.Open(input_tiff, gdal.GA_Update)
@@ -350,12 +352,12 @@ class Elevation(BaseAPI):
         infile = os.path.basename(infile)
 
         match = re.search(r'^([NS])(\d{2})([EW])(\d{3})\.SRTMGL1\.hgt$', infile, re.IGNORECASE)
+        groups = match.groups()
         if match:
-            n_or_s = match.group(0)[0]
-            e_or_w = match.group(0)[3]
-            n_value = match.group(1)
-            e_value = match.group(2)
-
+            n_or_s = groups[0]
+            e_or_w = groups[2]
+            n_value = groups[1]
+            e_value = groups[3]
         lat = float(n_value) * (1 if n_or_s.lower() == 'n' else -1) + 1
         lon = float(e_value) * (1 if e_or_w.lower() == 'e' else -1)
 
