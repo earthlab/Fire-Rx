@@ -143,11 +143,11 @@ class BaseAPI:
 
     BASE_URL = None
 
-    def __init__(self):
+    def __init__(self, username, password):
         """
         Initializes the NASA EarthData credentials
         """
-        self._username, self._password = self._get_auth_credentials()
+        self._username, self._password = username, password
 
     @staticmethod
     def get_utm_epsg(lat, lon) -> str:
@@ -228,8 +228,8 @@ class Elevation(BaseAPI):
     """
     BASE_URL = 'https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/'
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, username, password):
+        super().__init__(username, password)
 
     @staticmethod
     def _get_auth_credentials() -> Tuple[str, str]:
@@ -307,7 +307,7 @@ class Elevation(BaseAPI):
         with rasterio.open(output_file, "w", **out_meta) as dest:
             dest.write(mosaic)
 
-    def download_bbox(self, out_file: str, bbox: List[float], outdir:str,  buffer: float = 0) -> None:
+    def download_bbox(self, bbox: List[float], out_dir:str,  buffer: float = 0) -> None:
         """
         Downloads data given a region and district. Bounding box will be read in from the region_info.yaml file in the
         root data directory. If the region or district is not found an error will be raised.
@@ -316,13 +316,10 @@ class Elevation(BaseAPI):
             bbox (list): Bounding box defining area of data request in [min_lon, min_lat, max_lon, max_lat]
             buffer (float): Buffer to add to the bounding box in meters
         """
-        temp_dir = self._download_bbox(bbox, outdir, buffer)
+        self._download_bbox(bbox, out_dir, buffer)
 
         # 2) Create a composite of all tiffs in the temp_dir
-        self._mosaic_tif_files(temp_dir, output_file=out_file)
-
-        # 3) Cleanup
-        shutil.rmtree(temp_dir)
+        self._mosaic_tif_files(out_dir, output_file='elevation.tif')
 
     def lat_lon_to_meters(self, input_tiff: str):
         input_tiff_file = gdal.Open(input_tiff, gdal.GA_Update)
@@ -362,33 +359,23 @@ class Elevation(BaseAPI):
         bbox[2] += buffer
         bbox[3] += buffer
 
-        try:
-            # 1) Download all overlapping files and convert to tiff in parallel
-            file_names = self._resolve_filenames(bbox)
-            task_args = []
-            for file_name in file_names:
-                print(self._username, self._password)
-                task_args.append(
-                    Namespace(
-                        link=(os.path.join(self.BASE_URL, file_name)),
-                        out_dir=out_dir,
-                        top_left_coord=self._get_top_left_coordinate_from_filename(file_name),
-                        username=self._username,
-                        password=self._password
-                    )
+        # 1) Download all overlapping files and convert to tiff in parallel
+        file_names = self._resolve_filenames(bbox)
+        task_args = []
+        for file_name in file_names:
+            task_args.append(
+                Namespace(
+                    link=(os.path.join(self.BASE_URL, file_name)),
+                    out_dir=out_dir,
+                    top_left_coord=self._get_top_left_coordinate_from_filename(file_name),
+                    username=self._username,
+                    password=self._password
                 )
-            # If you make too many requests in parallel the server will stop you
-            # with mp.Pool(1) as pool:
-            #     for _ in tqdm(pool.imap(_elevation_download_task, task_args), total=len(task_args)):
-            #         pass
-            for task in task_args:
-                _elevation_download_task(task)
+            )
+        for task in task_args:
+            _elevation_download_task(task)
 
-            return temp_dir
 
-        except Exception as e:
-            shutil.rmtree(temp_dir)
-            raise e
 
     @staticmethod
     def _get_top_left_coordinate_from_filename(infile: str) -> Tuple[float, float]:
@@ -534,20 +521,18 @@ class Elevation(BaseAPI):
                         dst_crs=target_crs,
                         resampling=Resampling.nearest)
 
-    def rd_derive_from_elevation(self, elevation_file, slope_outfile, attrib: str):
+    def rd_derive_slope_from_elevation(self, elevation_file, slope_outfile):
         """
         A Slope calculation (degrees)
-        C Horn, B.K.P., 1981. Hill shading and the reflectance map. Proceedings of the IEEE 69, 14–47. doi:10.1109/PROC.1981.11918
-        A Aspect attribute calculation
         C Horn, B.K.P., 1981. Hill shading and the reflectance map. Proceedings of the IEEE 69, 14–47. doi:10.1109/PROC.1981.11918
         :param elevation_file:
         :param slope_outfile:
         :param attrib:
         :return:
         """
-        elevation_meters = self.reproject_to_meters(elevation_file, 'temp1.tif')
+        _ = self.reproject_to_meters(elevation_file, 'temp1.tif')
         f = rd.LoadGDAL('temp1.tif')
-        slope = rd.TerrainAttribute(f, attrib=attrib)
+        slope = rd.TerrainAttribute(f, attrib='slope_riserun')
 
         meters_dataset = gdal.Open('temp1.tif')
         geo_transform = meters_dataset.GetGeoTransform()
@@ -561,10 +546,47 @@ class Elevation(BaseAPI):
         os.remove('temp1.tif')
         os.remove('temp2.tif')
 
+    def rd_derive_aspect_from_elevation(self, elevation_file, aspect_outfile):
+        """
+        A Aspect attribute calculation
+        C Horn, B.K.P., 1981. Hill shading and the reflectance map. Proceedings of the IEEE 69, 14–47. doi:10.1109/PROC.1981.11918
+        :param elevation_file:
+        :param aspect_outfile:
+        :param attrib:
+        :return:
+        """
+        _ = self.reproject_to_meters(elevation_file, 'temp1.tif')
+        f = rd.LoadGDAL('temp1.tif')
+        slope = rd.TerrainAttribute(f, attrib='aspect')
+
+        meters_dataset = gdal.Open('temp1.tif')
+        geo_transform = meters_dataset.GetGeoTransform()
+        projection = meters_dataset.GetProjection()
+
+        with rasterio.open(elevation_file) as f:
+            target_crs = f.crs
+
+        self._numpy_array_to_raster('temp2.tif', slope, geo_transform, projection, no_data=-9999)
+        self.reproject_to_latlon('temp2.tif', aspect_outfile, target_crs)
+        os.remove('temp1.tif')
+        os.remove('temp2.tif')
+
     def merge_tif_files(self, input_directory, output_tif):
         """
         Merge multiple TIFF files into a single TIFF file.
+res = 0
+        stack = []
+        for i, n in enumerate(arr):
+            while stack and stack[-1][0] > n:
+                v, j = stack.pop()
+                res += (v * (i-j)) + n
+            stack.append((n, i))
 
+        while len(stack) > 1:
+            v, i = stack.pop()
+            res += v * (len(arr) - i)
+
+        return res
         :param input_directory: Directory containing the input TIFF files.
         :param output_tif: Path to the output merged TIFF file.
         """

@@ -48,8 +48,6 @@ class BaseAPI:
     PROJ_DIR = os.path.dirname(os.path.dirname(__file__))
     _BASE_WUE_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO4WUE.001/'
     _BASE_GEO_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO1BGEO.001/'
-    _BASE_CLOUD_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO2CLD.001/'
-    _BASE_ESI_URL = 'https://e4ftl01.cr.usgs.gov/ECOSTRESS/ECO4ESIPTJPL.001/'
 
     _XML_DIR = os.path.join(PROJ_DIR, 'xml_files')
 
@@ -301,18 +299,14 @@ class BaseAPI:
         return output_path
 
 
-class L4(BaseAPI):
+class WUE(BaseAPI):
 
     def __init__(self, username: str = None, password: str = None, lazy: bool = False):
         super().__init__(username=username, password=password, lazy=lazy)
         common_regex = r'\_(?P<orbit>\d{5})\_(?P<scene_id>\d{3})\_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})\_(?P<build_id>\d{4})\_(?P<version>\d{2})\.h5$'
         self._wue_file_re = r'ECOSTRESS\_L4\_WUE' + common_regex
         self._bgeo_file_re = r'ECOSTRESS\_L1B\_GEO' + common_regex
-        self._cloud_file_re = r'ECOSTRESS\_L2\_CLOUD' + common_regex
-        self._esi_file_re = r'ECOSTRESS\_L4\_ESI\_PT-JPL' + common_regex
-        self._cloud_file_tif_re = r'ECOSTRESS\_L2\_CLOUD' + common_regex.replace('.h5', '_CloudMask_GEO.tif')
         self._wue_tif_re = r'ECOSTRESS\_L4\_WUE' + common_regex.replace('.h5', '_WUEavg_GEO.tif')
-        self._esi_tif_re = r'ECOSTRESS\_L4\_ESI\_PT-JPL' + common_regex.replace('.h5', '_ESIavg_GEO.tif')
         self._db_re = r'(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\_(?P<min_lon>\-?\d+\.\d+)\_(?P<max_lon>\-?\d+\.\d+)\_(?P<min_lat>\-?\d+\.\d+)\_(?P<max_lat>\-?\d+\.\d+)\_(?P<lon_res>\-?\d+\.\d+)\_(?P<lat_res>\-?\d+\.\d+)\.db$'
         self._res = 0.0006298419
         self._projection = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]'
@@ -355,8 +349,8 @@ class L4(BaseAPI):
 
         return file_dict
 
-    def gather_file_links(self, years: List[int], month_start: int, month_end: int, hour_start: int,
-                          hour_end: int, bbox: List[int], url_progress_file_path: str) -> List[Tuple[str, str, str]]:
+    def _gather_file_links(self, years: List[int], month_start: int, month_end: int, hour_start: int,
+                           hour_end: int, bbox: List[int], url_progress_file_path: str) -> List[Tuple[str, str, str]]:
         day_urls = []
         for year in years:
             start_date = datetime(year, month_start, 1)
@@ -389,9 +383,7 @@ class L4(BaseAPI):
                     day, url, accepted = result
                     new_row = {
                         'wue_url': url,
-                        'esi_url': None,
                         'geo_url': None,
-                        'cloud_url': None,
                         'day': day,
                         'accepted': accepted
                     }
@@ -405,8 +397,7 @@ class L4(BaseAPI):
         progress_df = pd.read_csv(url_progress_file_path)
         geo_lookup = collections.defaultdict(list)
         for _, row in progress_df.iterrows():
-            if ((not isinstance(row['geo_url'], str) or not isinstance(row['cloud_url'], str) or not
-                 isinstance(row['esi_url'], str)) and row['accepted']):
+            if not isinstance(row['geo_url'], str) and row['accepted']:
                 geo_lookup[row['day']].append(row['wue_url'])
 
         # Now find the GEO and CLOUD urls. The versions are not always the same (this doesn't matter for the swath2grid function)
@@ -414,23 +405,15 @@ class L4(BaseAPI):
         i = 0
         for date, wue_file_links in geo_lookup.items():
             geo_date_url = urllib.parse.urljoin(self._BASE_GEO_URL, date)
-            cloud_date_url = urllib.parse.urljoin(self._BASE_CLOUD_URL, date)
-            esi_date_url = urllib.parse.urljoin(self._BASE_ESI_URL, date)
             geo_links = self.retrieve_links(geo_date_url, '.h5')
-            cloud_links = self.retrieve_links(cloud_date_url, '.h5')
-            esi_links = self.retrieve_links(esi_date_url, '.h5')
 
             geo_file_dict = self._find_matching_urls(self._BASE_GEO_URL, date, geo_links, self._bgeo_file_re)
-            cloud_file_dict = self._find_matching_urls(self._BASE_CLOUD_URL, date, cloud_links, self._cloud_file_re)
-            esi_file_dict = self._find_matching_urls(self._BASE_ESI_URL, date, esi_links, self._esi_file_re)
 
             for wue_file_link in wue_file_links:
                 group_dict = re.match(self._wue_file_re, os.path.basename(wue_file_link)).groupdict()
                 key = self._generate_file_key(group_dict)
-                if key in geo_file_dict and key in cloud_file_dict and key in esi_file_dict:
+                if key in geo_file_dict:
                     progress_df.loc[progress_df['wue_url'] == wue_file_link, 'geo_url'] = geo_file_dict[key]
-                    progress_df.loc[progress_df['wue_url'] == wue_file_link, 'cloud_url'] = cloud_file_dict[key]
-                    progress_df.loc[progress_df['wue_url'] == wue_file_link, 'esi_url'] = esi_file_dict[key]
 
                     if i > 0 and i % save_interval == 0:
                         progress_df.to_csv(url_progress_file_path, index=False)
@@ -440,59 +423,45 @@ class L4(BaseAPI):
 
         accepted_df = progress_df[progress_df['accepted'] == True]
 
-        return [tuple(row) for row in accepted_df[['wue_url', 'esi_url', 'cloud_url', 'geo_url']].values]
+        return [tuple(row) for row in accepted_df[['wue_url', 'geo_url']].values]
 
-    @staticmethod
-    def _create_cloud_mask(cloud_data: np.array) -> np.array:
-        mask = np.zeros_like(cloud_data)
-        for row_idx, col_idx in np.ndindex(cloud_data.shape):
-            v = cloud_data[row_idx, col_idx]
-            bits = [bool(int(c)) for c in bin(v)[2:].zfill(8)]
-            bits.reverse()
-            mask[row_idx, col_idx] = 1 if (
-                    bits[0] and
-                    (bits[1] or bits[2]) and
-                    not bits[6] and
-                    not bits[7]
-            ) else 0
+    def _process_region(self, args):
+        try:
+            overlapping_files, mosaic_array, valid_lower_bound, valid_upper_bound, region_bounds, outfile = args
+            region_min_lon, region_max_lon, region_min_lat, region_max_lat = region_bounds
 
-        print(any(mask.flatten()), np.count_nonzero(mask.flatten()), np.count_nonzero(mask.flatten()) / mask.size)
+            index_to_median = collections.defaultdict(list)
+            for f_i, file in enumerate(overlapping_files):
+                g = gdal.Open(file)
+                gt = g.GetGeoTransform()
+                data = g.ReadAsArray()
 
-        return mask
+                t1 = time.time()
+                for i, row in enumerate(data):
+                    row_lat = gt[3] + (gt[5] * i)
+                    if not region_min_lat <= row_lat <= region_max_lat:
+                        continue
+                    for j, column in enumerate(row):
+                        row_lon = gt[0] + (gt[1] * j)
+                        region_indices = (int((region_max_lat - row_lat) / self._res),
+                                          int((row_lon - region_min_lon) / self._res))
+                        val = data[i, j]
+                        index_to_median[region_indices].append(val if valid_lower_bound <= val <= valid_upper_bound
+                                                               else np.nan)
+                    if i % 1000 == 0:
+                        print(f'{i} / {data.shape[0]} File {f_i + 1} / {len(overlapping_files)} {time.time() - t1}')
 
-    def process_region(self, args):
-        overlapping_files, mosaic_array, valid_lower_bound, valid_upper_bound, region_bounds, outfile = args
-        region_min_lon, region_max_lon, region_min_lat, region_max_lat = region_bounds
 
-        index_to_median = collections.defaultdict(list)
-        for f_i, file in enumerate(overlapping_files):
-            g = gdal.Open(file)
-            gt = g.GetGeoTransform()
-            data = g.ReadAsArray()
+            for k, v in index_to_median.items():
+                mosaic_array[k] = np.nanmedian(v)
 
-            t1 = time.time()
-            for i, row in enumerate(data):
-                row_lat = gt[3] + (gt[5] * i)
-                if not region_min_lat <= row_lat <= region_max_lat:
-                    continue
-                for j, column in enumerate(row):
-                    row_lon = gt[0] + (gt[1] * j)
-                    region_indices = (int((region_max_lat - row_lat) / self._res),
-                                      int((row_lon - region_min_lon) / self._res))
-                    val = data[i, j]
-                    index_to_median[region_indices].append(val if valid_lower_bound <= val <= valid_upper_bound
-                                                           else np.nan)
-                if i % 1000 == 0:
-                    print(f'{i} / {data.shape[0]} File {f_i + 1} / {len(overlapping_files)} {time.time() - t1}')
-
-        for k, v in index_to_median.items():
-            mosaic_array[k] = np.nanmedian(v)
-
-        mosaic_array = mosaic_array.astype(np.float32)
-        self._numpy_array_to_raster(
-            outfile, mosaic_array, [region_min_lon, self._res, 0, region_max_lat, 0, -self._res],
-            self._projection)
-        del mosaic_array
+            mosaic_array = mosaic_array.astype(np.float32)
+            self._numpy_array_to_raster(
+                outfile, mosaic_array, [region_min_lon, self._res, 0, region_max_lat, 0, -self._res],
+                self._projection)
+            del mosaic_array
+        except:
+            return
 
     @staticmethod
     def create_mosaic(in_dir: str, out_file: str):
@@ -524,18 +493,12 @@ class L4(BaseAPI):
         with rasterio.open(out_file, "w", **out_meta) as dest:
             dest.write(mosaic)
 
-    def _create_composite(self, file_dir: str, year: int, bbox: List[int], out_dir: str, output_type: str,
+    def create_composite(self, file_dir: str, year: int, bbox: List[int], out_dir: str,
                           n_regions: int = 10, processes: int = 6):
-        if output_type == 'WUE':
-            output_re = self._wue_tif_re
-            output_prefix = 'ECOSTRESS_L4_WUE_'
-            valid_lower_bound = 0
-            valid_upper_bound = 20
-        elif output_type == 'ESI':
-            output_re = self._esi_tif_re
-            output_prefix = 'ECOSTRESS_L4_ESI_PT-JPL_'
-            valid_lower_bound = 0
-            valid_upper_bound = 2
+        output_re = self._wue_tif_re
+        output_prefix = 'ECOSTRESS_L4_WUE_'
+        valid_lower_bound = 0
+        valid_upper_bound = 20
 
         # First get all the files, filtering on the hour month and bounding box
         min_lon, min_lat, max_lon, max_lat = bbox[0], bbox[1], bbox[2], bbox[3]
@@ -554,10 +517,8 @@ class L4(BaseAPI):
                     file_regions[file_path] = bounds
                     del g
 
-        print('Matching files')
         matching_files = {}
         for file, bounds in file_regions.items():
-            group_dict = re.match(output_re, os.path.basename(file)).groupdict()
             if (
                     bounds[0] < max_lon and
                     bounds[1] > min_lon and
@@ -604,14 +565,12 @@ class L4(BaseAPI):
 
         print('Processing regions')
         with mp.Pool(processes=processes) as pool:
-            results = pool.map(self.process_region, args)
+            results = pool.map(self._process_region, args)
 
     @staticmethod
     def _h5_in_completed_files(h5_name: str, completed_files: List[str]):
         m = {
             '_WUE_': '_WUEavg_GEO.tif',
-            '_ESI_PT-JPL_': '_ESIavg_GEO.tif',
-            '_CLOUD_': '_CloudMask_GEO.tif'
         }
         for k, v in m.items():
             if k in h5_name:
@@ -626,13 +585,9 @@ class L4(BaseAPI):
                                   os.path.basename(dest).strip('.h5').replace('L1B_GEO', 'L4_WUE')[:43] +
                                   '*' + '_WUEavg_GEO.tif')))
 
-    def download_composite(self, years: List[int], month_start: int, month_end: int, hour_start: int, hour_end: int,
-                           bbox: List[int], esi: bool = True, batch_size: int = 50):
+    def download_and_rasterize_ecostress(self, out_dir: str, years: List[int], month_start: int, month_end: int,
+                                         hour_start: int, hour_end: int, bbox: List[int], batch_size: int = 50):
         set_start_method('fork')
-
-        out_dir = os.path.join(self.PROJ_DIR, 'data',
-                               f"{'_'.join([str(y) for y in years])}_{month_start}_{month_end}_{hour_start}_{hour_end}")
-        os.makedirs(out_dir, exist_ok=True)
 
         batch_out_dir = os.path.join(out_dir, 'batch')
         os.makedirs(batch_out_dir, exist_ok=True)
@@ -645,8 +600,6 @@ class L4(BaseAPI):
             pd.DataFrame({
                 'wue_url': [],
                 'geo_url': [],
-                'esi_url': [],
-                'cloud_url': [],
                 'day': [],
                 'accepted': []
             }).to_csv(url_progress_file_path, index=False)
@@ -660,7 +613,7 @@ class L4(BaseAPI):
             completed_files = set([c.replace('\n', '') for c in f.readlines()])
 
         # Download the files if they don't exist
-        urls = self.gather_file_links(years, month_start, month_end, hour_start, hour_end, bbox, url_progress_file_path)
+        urls = self._gather_file_links(years, month_start, month_end, hour_start, hour_end, bbox, url_progress_file_path)
 
         # The geo files are large enough that it makes sense to delete them periodically by processing the swaths in
         # batches
@@ -671,17 +624,12 @@ class L4(BaseAPI):
             wue_requests, esi_requests, cloud_requests, geo_requests = [], [], [], []
             for url_set in url_batch:
                 f = False
-                if isinstance(url_set[0], str) and not self._h5_in_completed_files(os.path.basename(url_set[0]), completed_files):
+                if isinstance(url_set[0], str) and not self._h5_in_completed_files(os.path.basename(url_set[0]),
+                                                                                   completed_files):
                     f = True
                     wue_requests.append((url_set[0], os.path.join(batch_out_dir, os.path.basename(url_set[0]))))
-                if esi and isinstance(url_set[1], str) and not self._h5_in_completed_files(os.path.basename(url_set[1]), completed_files):
-                    f = True
-                    esi_requests.append((url_set[1], os.path.join(batch_out_dir, os.path.basename(url_set[1]))))
-                if isinstance(url_set[2], str) and not self._h5_in_completed_files(os.path.basename(url_set[2]), completed_files):
-                    f = True
-                    cloud_requests.append((url_set[2], os.path.join(batch_out_dir, os.path.basename(url_set[2]))))
-                if isinstance(url_set[3], str) and f:
-                    geo_requests.append((url_set[3], os.path.join(batch_out_dir, os.path.basename(url_set[3]))))
+                if isinstance(url_set[1], str) and f:
+                    geo_requests.append((url_set[1], os.path.join(batch_out_dir, os.path.basename(url_set[1]))))
 
             if wue_requests:
                 print(f'Downloading WUE requests {wue_requests}')
@@ -691,16 +639,8 @@ class L4(BaseAPI):
                 print(f'Downloading GEO requests {geo_requests}')
                 self.download_time_series(geo_requests, batch_out_dir)
 
-            if cloud_requests:
-                print(f'Downloading CLOUD requests {cloud_requests}')
-                self.download_time_series(cloud_requests, batch_out_dir)
-
-            if esi_requests:
-                print(f'Downloading ESI requests {esi_requests}')
-                self.download_time_series(esi_requests, batch_out_dir)
-
             # Convert them into TIFs
-            if geo_requests or wue_requests or cloud_requests or esi_requests:
+            if geo_requests or wue_requests:
                 main(Namespace(proj='GEO', dir=batch_out_dir, out_dir=geo_tiff_dir, sds=None, utmzone=None, bt=None))
                 with open(completed_files_path, 'r') as f:
                     completed_files = f.readlines()
