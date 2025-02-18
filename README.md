@@ -1,5 +1,7 @@
 # NASA Rx-Fire Ready-to-Use Data
-This repository contains codes to collect, process, and create ready-to-use Western US layers from NASA assets. These layers include ECOSTRESS Water Use Efficiency, SRTM Elevation, Slope and Aspect, GEDI aboveground biomass, and Forest Age from Pan et al. (2012). This repository is a product of the project NASA Rx-Fire: Prescribed Fire to Support Ecosystem Services (Award Number 80NSSC23K0397).
+This repository contains codes to collect, process, and create ready-to-use Western US layers from NASA assets. These layers include ECOSTRESS Water Use Efficiency, SRTM Elevation, Slope and Aspect, GEDI aboveground biomass, and Forest Age from Pan et al. (2012). 
+
+This repository is a product of the project "NASA Rx-Fire: Prescribed Fire to Support Ecosystem Services" (Award Number 80NSSC23K0397).
 
 ## ECOSTRESS WUE data
 ECOSTRESS data is acquired by sending requests to the ECOSTRESS USGS servers at
